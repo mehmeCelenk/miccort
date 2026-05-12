@@ -22,6 +22,16 @@ interface ClientSession {
   socket: WebSocket;
   roomId: string;
   userId: string;
+  displayName: string;
+}
+
+interface JoinPayload {
+  displayName?: string;
+}
+
+interface UserSummary {
+  id: string;
+  displayName: string;
 }
 
 export interface Env {
@@ -87,7 +97,7 @@ export class SignalingHub extends DurableObject<Env> {
 
     switch (message.type) {
       case "join-room":
-        this.join(socket, message.roomId, message.userId);
+        this.join(socket, message.roomId, message.userId, readDisplayName(message.payload));
         break;
       case "offer":
       case "answer":
@@ -99,7 +109,12 @@ export class SignalingHub extends DurableObject<Env> {
     }
   }
 
-  private join(socket: WebSocket, roomId?: string, requestedUserId?: string) {
+  private join(
+    socket: WebSocket,
+    roomId?: string,
+    requestedUserId?: string,
+    requestedDisplayName?: string,
+  ) {
     if (!roomId) {
       this.send(socket, { type: "error", payload: { message: "roomId is required" } });
       return;
@@ -108,14 +123,15 @@ export class SignalingHub extends DurableObject<Env> {
     this.leave(socket);
 
     const userId = requestedUserId || crypto.randomUUID();
+    const displayName = requestedDisplayName || `Guest ${userId.slice(0, 4)}`;
     let room = this.rooms.get(roomId);
     if (!room) {
       room = new Map<string, ClientSession>();
       this.rooms.set(roomId, room);
     }
 
-    const existingUsers = [...room.keys()];
-    const session = { socket, roomId, userId };
+    const existingUsers = [...room.values()].map(toUserSummary);
+    const session = { socket, roomId, userId, displayName };
     room.set(userId, session);
     this.sessions.set(socket, session);
 
@@ -123,13 +139,17 @@ export class SignalingHub extends DurableObject<Env> {
       type: "room-users",
       roomId,
       userId,
-      payload: { users: existingUsers },
+      payload: {
+        users: existingUsers,
+        self: toUserSummary(session),
+      },
     });
 
     this.broadcast(roomId, {
       type: "user-joined",
       roomId,
       userId,
+      payload: toUserSummary(session),
     }, userId);
   }
 
@@ -203,4 +223,19 @@ export class SignalingHub extends DurableObject<Env> {
       this.leave(socket);
     }
   }
+}
+
+function readDisplayName(payload: unknown) {
+  if (!payload || typeof payload !== "object") {
+    return "";
+  }
+  const joinPayload = payload as JoinPayload;
+  return joinPayload.displayName?.trim() ?? "";
+}
+
+function toUserSummary(session: ClientSession): UserSummary {
+  return {
+    id: session.userId,
+    displayName: session.displayName,
+  };
 }
