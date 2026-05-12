@@ -383,7 +383,7 @@ async function ensurePeer(userId: string, makeOffer: boolean) {
   }
 
   if (screenStream) {
-    for (const track of screenStream.getVideoTracks()) {
+    for (const track of screenStream.getTracks()) {
       if (!peer.getSenders().some((sender) => sender.track === track)) {
         peer.addTrack(track, screenStream);
       }
@@ -430,7 +430,8 @@ function createPeer(userId: string) {
 
   peer.ontrack = (event) => {
     if (event.track.kind === 'audio') {
-      attachRemoteAudio(userId, event.streams[0]);
+      const source = event.streams[0]?.getVideoTracks().length ? 'screen' : 'mic';
+      attachRemoteAudio(userId, event.streams[0], source);
     } else if (event.track.kind === 'video') {
       attachRemoteScreen(userId, event.streams[0]);
     }
@@ -474,14 +475,15 @@ async function flushQueuedCandidates(userId: string, peer: RTCPeerConnection) {
   }
 }
 
-function attachRemoteAudio(userId: string, stream: MediaStream) {
+function attachRemoteAudio(userId: string, stream: MediaStream, source: 'mic' | 'screen') {
   const host = remoteAudio.value;
-  if (!host || host.querySelector(`[data-user-id="${userId}"]`)) {
+  if (!host || host.querySelector(`[data-user-id="${userId}"][data-source="${source}"]`)) {
     return;
   }
 
   const audio = document.createElement('audio');
   audio.dataset.userId = userId;
+  audio.dataset.source = source;
   audio.autoplay = true;
   audio.volume = outputVolume.value / 100;
   audio.srcObject = stream;
@@ -502,7 +504,7 @@ async function startScreenShare() {
     error.value = '';
     screenStream = await navigator.mediaDevices.getDisplayMedia({
       video: true,
-      audio: false,
+      audio: true,
     });
     sharingScreen.value = true;
 
@@ -521,13 +523,14 @@ async function startScreenShare() {
 
 async function stopScreenShare() {
   const stoppedStream = screenStream;
+  const stoppedTrackIds = new Set(stoppedStream?.getTracks().map((track) => track.id) ?? []);
   screenStream = null;
   sharingScreen.value = false;
   stoppedStream?.getTracks().forEach((track) => track.stop());
 
   for (const peer of peers.values()) {
     for (const sender of peer.getSenders()) {
-      if (sender.track?.kind === 'video') {
+      if (sender.track && stoppedTrackIds.has(sender.track.id)) {
         await sender.replaceTrack(null);
       }
     }
@@ -573,8 +576,8 @@ function closePeer(userId: string) {
   peers.delete(userId);
   queuedCandidates.delete(userId);
   delete peerStates[userId];
-  remoteAudio.value?.querySelector(`[data-user-id="${userId}"]`)?.remove();
-  screenShareHost.value?.querySelector(`[data-user-id="${userId}"]`)?.remove();
+  remoteAudio.value?.querySelectorAll(`[data-user-id="${userId}"]`).forEach((element) => element.remove());
+  screenShareHost.value?.querySelectorAll(`[data-user-id="${userId}"]`).forEach((element) => element.remove());
 }
 
 function cleanup() {

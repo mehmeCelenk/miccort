@@ -1,11 +1,13 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue';
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
 import VoiceRoom from './components/VoiceRoom.vue';
 
 const roomId = ref('');
 const serverUrl = ref('ws://localhost:8080/ws');
 const displayName = ref('');
 const activeRoomId = ref('');
+const updateMessage = ref('');
+const updateTone = ref<'info' | 'success' | 'error'>('info');
 
 const canJoin = computed(
   () =>
@@ -13,6 +15,14 @@ const canJoin = computed(
     serverUrl.value.trim().length > 0 &&
     displayName.value.trim().length > 0,
 );
+
+onMounted(() => {
+  window.addEventListener('mikcort:update-status', handleUpdateStatus);
+});
+
+onBeforeUnmount(() => {
+  window.removeEventListener('mikcort:update-status', handleUpdateStatus);
+});
 
 function createRoom() {
   roomId.value = crypto.randomUUID().slice(0, 8);
@@ -29,10 +39,28 @@ function joinRoom() {
 function leaveRoom() {
   activeRoomId.value = '';
 }
+
+function handleUpdateStatus(event: Event) {
+  const detail = (event as CustomEvent<{ status: string; message: string }>).detail;
+  updateMessage.value = detail.message;
+  updateTone.value = detail.status === 'error' ? 'error' : detail.status === 'installed' ? 'success' : 'info';
+
+  if (detail.status === 'not-available') {
+    window.setTimeout(() => {
+      if (updateMessage.value === detail.message) {
+        updateMessage.value = '';
+      }
+    }, 5000);
+  }
+}
 </script>
 
 <template>
   <main class="app-shell">
+    <div v-if="updateMessage" :class="['update-toast', updateTone]">
+      {{ updateMessage }}
+    </div>
+
     <section v-if="!activeRoomId" class="home">
       <aside class="brand-rail" aria-label="Workspace switcher">
         <div class="brand-mark">M</div>
