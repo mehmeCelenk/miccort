@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue';
+import { Headphones, Mic, MicOff, PhoneOff, Settings, VolumeX, X } from 'lucide-vue-next';
 
 type SignalType =
   | 'join-room'
@@ -20,16 +21,23 @@ interface SignalMessage {
 }
 
 interface RoomUsersPayload {
-  users: string[];
+  users: Array<string | UserSummary>;
+  self?: UserSummary;
 }
 
 interface ErrorPayload {
   message: string;
 }
 
+interface UserSummary {
+  id: string;
+  displayName?: string;
+}
+
 const props = defineProps<{
   roomId: string;
   serverUrl: string;
+  displayName: string;
 }>();
 
 const emit = defineEmits<{
@@ -42,6 +50,9 @@ const status = ref('Connecting to signaling server...');
 const error = ref('');
 const micStarted = ref(false);
 const muted = ref(false);
+const deafened = ref(false);
+const mutedBeforeDeafen = ref<boolean | null>(null);
+const settingsOpen = ref(false);
 const wsOpen = ref(false);
 const remoteAudio = ref<HTMLDivElement | null>(null);
 const inputDevices = ref<MediaDeviceInfo[]>([]);
@@ -54,6 +65,7 @@ const noiseSuppression = ref(true);
 const echoCancellation = ref(true);
 const autoGainControl = ref(true);
 const peerStates = reactive<Record<string, string>>({});
+const userNames = reactive<Record<string, string>>({});
 
 let socket: WebSocket | null = null;
 let rawLocalStream: MediaStream | null = null;
@@ -64,6 +76,14 @@ const peers = new Map<string, RTCPeerConnection>();
 const queuedCandidates = new Map<string, RTCIceCandidateInit[]>();
 
 const otherUsers = computed(() => users.value.filter((userId) => userId !== currentUserId.value));
+const roomTag = computed(() => props.roomId.slice(0, 2).toUpperCase());
+const connectionLabel = computed(() => (wsOpen.value ? 'Connected' : 'Offline'));
+const voiceState = computed(() => {
+  if (!micStarted.value) {
+    return 'Ready';
+  }
+  return muted.value ? 'Muted' : 'Live';
+});
 
 onMounted(() => {
   connect();
@@ -82,6 +102,9 @@ function connect() {
       type: 'join-room',
       roomId: props.roomId,
       userId: currentUserId.value,
+      payload: {
+        displayName: props.displayName,
+      },
     });
   });
 
@@ -187,7 +210,7 @@ function updateMicGain() {
 }
 
 function updateRemoteAudioSettings() {
-  const volume = outputVolume.value / 100;
+  const volume = deafened.value ? 0 : outputVolume.value / 100;
   remoteAudio.value?.querySelectorAll('audio').forEach((element) => {
     const audio = element as HTMLAudioElement & {
       setSinkId?: (sinkId: string) => Promise<void>;
@@ -205,8 +228,33 @@ function toggleMute() {
   if (!localStream) {
     return;
   }
+  if (muted.value && deafened.value) {
+    deafened.value = false;
+    mutedBeforeDeafen.value = null;
+  }
   muted.value = !muted.value;
   setLocalTracksEnabled(!muted.value);
+  updateRemoteAudioSettings();
+}
+
+function toggleDeafen() {
+  const nextDeafened = !deafened.value;
+  deafened.value = nextDeafened;
+  if (nextDeafened) {
+    mutedBeforeDeafen.value = muted.value;
+    if (localStream && !muted.value) {
+      muted.value = true;
+      setLocalTracksEnabled(false);
+    }
+  } else {
+    const shouldRestoreMic = mutedBeforeDeafen.value === false;
+    mutedBeforeDeafen.value = null;
+    if (localStream && shouldRestoreMic) {
+      muted.value = false;
+      setLocalTracksEnabled(true);
+    }
+  }
+  updateRemoteAudioSettings();
 }
 
 function leave() {
@@ -221,11 +269,14 @@ async function handleSignal(message: SignalMessage) {
       if (message.userId) {
         currentUserId.value = message.userId;
       }
-      users.value = unique([currentUserId.value, ...(payload.users ?? [])]);
+      userNames[currentUserId.value] = payload.self?.displayName || props.displayName;
+      const existingUsers = (payload.users ?? []).map(registerUser);
+      users.value = unique([currentUserId.value, ...existingUsers]);
       break;
     }
     case 'user-joined':
       if (message.userId && message.userId !== currentUserId.value) {
+        registerUser((message.payload as UserSummary | undefined) ?? message.userId);
         users.value = unique([...users.value, message.userId]);
         if (localStream) {
           await ensurePeer(message.userId, true);
@@ -422,41 +473,156 @@ function send(message: SignalMessage) {
 function unique(values: string[]) {
   return [...new Set(values.filter(Boolean))];
 }
+
+function registerUser(user: string | UserSummary) {
+  if (typeof user === 'string') {
+    return user;
+  }
+  userNames[user.id] = user.displayName || `Guest ${user.id.slice(0, 4)}`;
+  return user.id;
+}
+
+function displayName(userId: string) {
+  return userNames[userId] || (userId === currentUserId.value ? props.displayName : `Guest ${userId.slice(0, 4)}`);
+}
+
+function initials(userId: string) {
+  return displayName(userId)
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((part) => part[0])
+    .join('')
+    .toUpperCase()
+    .padEnd(2, userId[0]?.toUpperCase() ?? 'M')
+    .slice(0, 2);
+}
 </script>
 
 <template>
-  <section class="room">
-    <header class="room-header">
-      <div>
-        <p class="eyebrow">Room {{ roomId }}</p>
-        <h1>Voice chat</h1>
+  <section class="room-shell">
+    <aside class="server-rail" aria-label="Workspace switcher">
+      <div class="server-pill active">{{ roomTag }}</div>
+      <div class="server-pill">+</div>
+      <div class="server-pill muted-pill">?</div>
+    </aside>
+
+    <aside class="channel-sidebar">
+      <div class="workspace-card">
+        <p class="eyebrow">Mikcort</p>
+        <strong>Room {{ roomId }}</strong>
       </div>
-      <button type="button" class="danger" @click="leave">Leave</button>
-    </header>
 
-    <div class="status-row">
-      <span :class="['dot', wsOpen ? 'online' : 'offline']"></span>
-      <span>{{ status }}</span>
-    </div>
+      <div class="voice-dock">
+        <div class="dock-user">
+          <span class="avatar">{{ initials(currentUserId) }}</span>
+          <div>
+            <strong>{{ displayName(currentUserId) }}</strong>
+            <small>{{ deafened ? 'Audio off' : voiceState }}</small>
+          </div>
+        </div>
 
-    <p v-if="error" class="error">{{ error }}</p>
+        <div class="dock-actions" aria-label="Voice controls">
+          <button
+            type="button"
+            class="icon-button"
+            :class="{ active: micStarted && !muted, danger: muted }"
+            :data-tooltip="micStarted ? (muted ? 'Unmute mic' : 'Mute mic') : 'Start mic'"
+            :title="micStarted ? (muted ? 'Unmute microphone' : 'Mute microphone') : 'Start microphone'"
+            @click="micStarted ? toggleMute() : startMicrophone()"
+          >
+            <MicOff v-if="muted" :size="20" />
+            <Mic v-else :size="20" />
+          </button>
 
-    <div class="controls">
-      <button type="button" :disabled="micStarted" @click="startMicrophone">
-        Start microphone
-      </button>
-      <button type="button" class="secondary" :disabled="!micStarted" @click="toggleMute">
-        {{ muted ? 'Unmute' : 'Mute' }}
-      </button>
-    </div>
+          <button
+            type="button"
+            class="icon-button"
+            :class="{ danger: deafened }"
+            :data-tooltip="deafened ? 'Enable audio' : 'Deafen'"
+            :title="deafened ? 'Turn output on' : 'Deafen output'"
+            @click="toggleDeafen"
+          >
+            <VolumeX v-if="deafened" :size="20" />
+            <Headphones v-else :size="20" />
+          </button>
 
-    <section class="panel settings-panel">
+          <button
+            type="button"
+            class="icon-button"
+            :class="{ selected: settingsOpen }"
+            data-tooltip="Settings"
+            title="Audio settings"
+            @click="settingsOpen = !settingsOpen"
+          >
+            <Settings :size="20" />
+          </button>
+
+          <button type="button" class="icon-button leave-button" data-tooltip="Leave room" title="Leave room" @click="leave">
+            <PhoneOff :size="20" />
+          </button>
+        </div>
+      </div>
+    </aside>
+
+    <main class="voice-stage">
+      <header class="stage-header">
+        <div>
+          <p class="eyebrow">Voice channel</p>
+          <h1>Lounge</h1>
+        </div>
+        <div class="connection-pill">
+          <span :class="['dot', wsOpen ? 'online' : 'offline']"></span>
+          {{ connectionLabel }}
+        </div>
+      </header>
+
+      <p v-if="error" class="error">{{ error }}</p>
+
+      <section class="voice-room-panel">
+        <div class="voice-room-copy">
+          <p>{{ status }}</p>
+          <strong>{{ users.length }} connected in Lounge</strong>
+        </div>
+
+        <div class="room-presence">
+          <div class="presence-row">
+            <span class="dot online"></span>
+            <span>{{ displayName(currentUserId) }}</span>
+            <small>{{ deafened ? 'deafened' : voiceState.toLowerCase() }}</small>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <aside class="member-sidebar">
       <div class="panel-heading">
-        <h2>Audio settings</h2>
-        <span>{{ micStarted ? 'live' : 'ready' }}</span>
+        <h2>Members</h2>
+        <span>{{ users.length }}/5</span>
+      </div>
+      <ul class="user-list">
+        <li v-for="userId in users" :key="userId">
+          <span class="avatar">{{ initials(userId) }}</span>
+          <div>
+            <strong>{{ displayName(userId) }}</strong>
+            <small>{{ userId === currentUserId ? (deafened ? 'deafened' : muted ? 'muted' : 'local') : peerStates[userId] ?? 'waiting' }}</small>
+          </div>
+        </li>
+      </ul>
+    </aside>
+
+    <aside v-if="settingsOpen" class="settings-drawer" aria-label="Audio settings">
+      <div class="drawer-header">
+        <div>
+          <p class="eyebrow">Device setup</p>
+          <h2>Audio settings</h2>
+        </div>
+        <button type="button" class="icon-button close-button" data-tooltip="Close" title="Close settings" @click="settingsOpen = false">
+          <X :size="18" />
+        </button>
       </div>
 
-      <div class="settings-grid">
+      <div class="settings-grid drawer-grid">
         <label>
           Microphone
           <select v-model="selectedInputId" @change="applyAudioSettings">
@@ -476,19 +642,19 @@ function unique(values: string[]) {
         </label>
 
         <label>
-          Microphone volume
+          Mic gain
           <input v-model.number="inputGain" type="range" min="0" max="200" @input="updateMicGain" />
           <small>{{ inputGain }}%</small>
         </label>
 
         <label>
-          Speaker volume
+          Output volume
           <input v-model.number="outputVolume" type="range" min="0" max="100" @input="updateRemoteAudioSettings" />
-          <small>{{ outputVolume }}%</small>
+          <small>{{ deafened ? 'Muted' : `${outputVolume}%` }}</small>
         </label>
       </div>
 
-      <div class="toggle-row">
+      <div class="toggle-row drawer-toggles">
         <label>
           <input v-model="noiseSuppression" type="checkbox" @change="applyAudioSettings" />
           Noise suppression
@@ -502,20 +668,7 @@ function unique(values: string[]) {
           Auto gain
         </label>
       </div>
-    </section>
-
-    <section class="panel">
-      <div class="panel-heading">
-        <h2>Users</h2>
-        <span>{{ users.length }}/5</span>
-      </div>
-      <ul class="user-list">
-        <li v-for="userId in users" :key="userId">
-          <span>{{ userId === currentUserId ? 'You' : userId.slice(0, 8) }}</span>
-          <small>{{ userId === currentUserId ? (muted ? 'muted' : 'local') : peerStates[userId] ?? 'waiting' }}</small>
-        </li>
-      </ul>
-    </section>
+    </aside>
 
     <div ref="remoteAudio" class="remote-audio" aria-hidden="true"></div>
   </section>

@@ -18,9 +18,10 @@ type Message struct {
 }
 
 type Client struct {
-	UserID string
-	RoomID string
-	Send   chan []byte
+	UserID      string
+	DisplayName string
+	RoomID      string
+	Send        chan []byte
 }
 
 type Hub struct {
@@ -39,7 +40,11 @@ func New() *Hub {
 func (h *Hub) Handle(client *Client, msg Message) {
 	switch msg.Type {
 	case "join-room":
-		h.Join(client, msg.RoomID, msg.UserID)
+		var payload struct {
+			DisplayName string `json:"displayName"`
+		}
+		_ = json.Unmarshal(msg.Payload, &payload)
+		h.Join(client, msg.RoomID, msg.UserID, payload.DisplayName)
 	case "offer", "answer", "ice-candidate":
 		h.forward(client, msg)
 	default:
@@ -47,7 +52,7 @@ func (h *Hub) Handle(client *Client, msg Message) {
 	}
 }
 
-func (h *Hub) Join(client *Client, roomID string, requestedUserID string) {
+func (h *Hub) Join(client *Client, roomID string, requestedUserID string, displayName string) {
 	if roomID == "" {
 		client.send(Message{Type: "error", Payload: rawError("roomId is required")})
 		return
@@ -61,7 +66,11 @@ func (h *Hub) Join(client *Client, roomID string, requestedUserID string) {
 	if requestedUserID == "" {
 		requestedUserID = randomID()
 	}
+	if displayName == "" {
+		displayName = "Guest " + requestedUserID[:4]
+	}
 	client.UserID = requestedUserID
+	client.DisplayName = displayName
 	client.RoomID = roomID
 
 	r, ok := h.rooms[roomID]
@@ -73,7 +82,18 @@ func (h *Hub) Join(client *Client, roomID string, requestedUserID string) {
 		h.clients[roomID] = make(map[string]*Client)
 	}
 
-	existingUsers := r.UserIDs()
+	existingUsers := make([]map[string]string, 0, len(r.UserIDs()))
+	for _, userID := range r.UserIDs() {
+		existing := h.clients[roomID][userID]
+		name := ""
+		if existing != nil {
+			name = existing.DisplayName
+		}
+		existingUsers = append(existingUsers, map[string]string{
+			"id":          userID,
+			"displayName": name,
+		})
+	}
 	r.Add(client.UserID)
 	h.clients[roomID][client.UserID] = client
 
@@ -89,12 +109,24 @@ func (h *Hub) Join(client *Client, roomID string, requestedUserID string) {
 		Type:   "room-users",
 		RoomID: roomID,
 		UserID: client.UserID,
-		Payload: mustJSON(map[string][]string{
+		Payload: mustJSON(map[string]any{
 			"users": existingUsers,
+			"self": map[string]string{
+				"id":          client.UserID,
+				"displayName": client.DisplayName,
+			},
 		}),
 	})
 
-	joined := Message{Type: "user-joined", RoomID: roomID, UserID: client.UserID}
+	joined := Message{
+		Type:   "user-joined",
+		RoomID: roomID,
+		UserID: client.UserID,
+		Payload: mustJSON(map[string]string{
+			"id":          client.UserID,
+			"displayName": client.DisplayName,
+		}),
+	}
 	for _, other := range others {
 		other.send(joined)
 	}
@@ -163,6 +195,7 @@ func (h *Hub) leaveLocked(client *Client) (string, string, []*Client) {
 
 	client.RoomID = ""
 	client.UserID = ""
+	client.DisplayName = ""
 	return roomID, userID, others
 }
 
