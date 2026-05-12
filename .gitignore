@@ -4,3 +4,5 @@ dist/
 src-tauri/target/
 .env
 .tauri/
+/mikcort.exe
+/uninstall.exe

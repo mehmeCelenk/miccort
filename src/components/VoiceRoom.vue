@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue';
-import { Headphones, Mic, MicOff, PhoneOff, Settings, VolumeX, X } from 'lucide-vue-next';
+import { Headphones, MonitorUp, Mic, MicOff, PhoneOff, Settings, VolumeX, X } from 'lucide-vue-next';
 
 type SignalType =
   | 'join-room'
@@ -10,6 +10,8 @@ type SignalType =
   | 'answer'
   | 'ice-candidate'
   | 'room-users'
+  | 'ping'
+  | 'pong'
   | 'error';
 
 interface SignalMessage {
@@ -53,8 +55,10 @@ const muted = ref(false);
 const deafened = ref(false);
 const mutedBeforeDeafen = ref<boolean | null>(null);
 const settingsOpen = ref(false);
+const sharingScreen = ref(false);
 const wsOpen = ref(false);
 const remoteAudio = ref<HTMLDivElement | null>(null);
+const screenShareHost = ref<HTMLDivElement | null>(null);
 const inputDevices = ref<MediaDeviceInfo[]>([]);
 const outputDevices = ref<MediaDeviceInfo[]>([]);
 const selectedInputId = ref('');
@@ -70,8 +74,12 @@ const userNames = reactive<Record<string, string>>({});
 let socket: WebSocket | null = null;
 let rawLocalStream: MediaStream | null = null;
 let localStream: MediaStream | null = null;
+let screenStream: MediaStream | null = null;
 let audioContext: AudioContext | null = null;
 let micGainNode: GainNode | null = null;
+let reconnectTimer: number | undefined;
+let heartbeatTimer: number | undefined;
+let intentionallyClosed = false;
 const peers = new Map<string, RTCPeerConnection>();
 const queuedCandidates = new Map<string, RTCIceCandidateInit[]>();
 
@@ -93,11 +101,16 @@ onMounted(() => {
 onBeforeUnmount(cleanup);
 
 function connect() {
+  clearReconnectTimer();
+  clearHeartbeat();
+  intentionallyClosed = false;
   socket = new WebSocket(props.serverUrl);
 
   socket.addEventListener('open', () => {
     wsOpen.value = true;
+    error.value = '';
     status.value = 'Joined room. Start your microphone when ready.';
+    startHeartbeat();
     send({
       type: 'join-room',
       roomId: props.roomId,
@@ -109,17 +122,53 @@ function connect() {
   });
 
   socket.addEventListener('message', (event: MessageEvent<string>) => {
-    void handleSignal(JSON.parse(event.data) as SignalMessage);
+    try {
+      void handleSignal(JSON.parse(event.data) as SignalMessage);
+    } catch {
+      error.value = 'Received invalid signaling message.';
+    }
   });
 
   socket.addEventListener('close', () => {
+    clearHeartbeat();
     wsOpen.value = false;
-    status.value = 'Disconnected from signaling server.';
+    status.value = 'Disconnected from signaling server. Reconnecting...';
+    if (!intentionallyClosed) {
+      scheduleReconnect();
+    }
   });
 
   socket.addEventListener('error', () => {
     error.value = 'Could not connect to the signaling server.';
   });
+}
+
+function scheduleReconnect() {
+  clearReconnectTimer();
+  reconnectTimer = window.setTimeout(() => {
+    connect();
+  }, 1500);
+}
+
+function clearReconnectTimer() {
+  if (reconnectTimer) {
+    window.clearTimeout(reconnectTimer);
+    reconnectTimer = undefined;
+  }
+}
+
+function startHeartbeat() {
+  clearHeartbeat();
+  heartbeatTimer = window.setInterval(() => {
+    send({ type: 'ping', roomId: props.roomId, userId: currentUserId.value });
+  }, 20_000);
+}
+
+function clearHeartbeat() {
+  if (heartbeatTimer) {
+    window.clearInterval(heartbeatTimer);
+    heartbeatTimer = undefined;
+  }
 }
 
 async function startMicrophone() {
@@ -308,6 +357,8 @@ async function handleSignal(message: SignalMessage) {
         await receiveCandidate(message.userId, message.payload as RTCIceCandidateInit);
       }
       break;
+    case 'pong':
+      break;
     case 'error': {
       const payload = message.payload as ErrorPayload;
       error.value = payload.message ?? 'Signaling error.';
@@ -327,6 +378,14 @@ async function ensurePeer(userId: string, makeOffer: boolean) {
     for (const track of localStream.getAudioTracks()) {
       if (!peer.getSenders().some((sender) => sender.track === track)) {
         peer.addTrack(track, localStream);
+      }
+    }
+  }
+
+  if (screenStream) {
+    for (const track of screenStream.getVideoTracks()) {
+      if (!peer.getSenders().some((sender) => sender.track === track)) {
+        peer.addTrack(track, screenStream);
       }
     }
   }
@@ -370,7 +429,11 @@ function createPeer(userId: string) {
   };
 
   peer.ontrack = (event) => {
-    attachRemoteAudio(userId, event.streams[0]);
+    if (event.track.kind === 'audio') {
+      attachRemoteAudio(userId, event.streams[0]);
+    } else if (event.track.kind === 'video') {
+      attachRemoteScreen(userId, event.streams[0]);
+    }
   };
 
   return peer;
@@ -426,20 +489,104 @@ function attachRemoteAudio(userId: string, stream: MediaStream) {
   updateRemoteAudioSettings();
 }
 
+async function toggleScreenShare() {
+  if (sharingScreen.value) {
+    await stopScreenShare();
+  } else {
+    await startScreenShare();
+  }
+}
+
+async function startScreenShare() {
+  try {
+    error.value = '';
+    screenStream = await navigator.mediaDevices.getDisplayMedia({
+      video: true,
+      audio: false,
+    });
+    sharingScreen.value = true;
+
+    const [track] = screenStream.getVideoTracks();
+    track.addEventListener('ended', () => {
+      void stopScreenShare();
+    });
+
+    for (const userId of otherUsers.value) {
+      await ensurePeer(userId, true);
+    }
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : 'Screen share could not start.';
+  }
+}
+
+async function stopScreenShare() {
+  const stoppedStream = screenStream;
+  screenStream = null;
+  sharingScreen.value = false;
+  stoppedStream?.getTracks().forEach((track) => track.stop());
+
+  for (const peer of peers.values()) {
+    for (const sender of peer.getSenders()) {
+      if (sender.track?.kind === 'video') {
+        await sender.replaceTrack(null);
+      }
+    }
+  }
+}
+
+function attachRemoteScreen(userId: string, stream: MediaStream) {
+  const host = screenShareHost.value;
+  if (!host) {
+    return;
+  }
+
+  const existing = host.querySelector<HTMLVideoElement>(`video[data-user-id="${userId}"]`);
+  if (existing) {
+    existing.srcObject = stream;
+    return;
+  }
+
+  const wrap = document.createElement('div');
+  wrap.className = 'screen-share-tile';
+  wrap.dataset.userId = userId;
+
+  const label = document.createElement('strong');
+  label.textContent = `${displayName(userId)} is sharing`;
+
+  const video = document.createElement('video');
+  video.dataset.userId = userId;
+  video.autoplay = true;
+  video.playsInline = true;
+  video.muted = true;
+  video.srcObject = stream;
+
+  wrap.append(label, video);
+  host.appendChild(wrap);
+
+  stream.getVideoTracks()[0]?.addEventListener('ended', () => {
+    wrap.remove();
+  });
+}
+
 function closePeer(userId: string) {
   peers.get(userId)?.close();
   peers.delete(userId);
   queuedCandidates.delete(userId);
   delete peerStates[userId];
   remoteAudio.value?.querySelector(`[data-user-id="${userId}"]`)?.remove();
+  screenShareHost.value?.querySelector(`[data-user-id="${userId}"]`)?.remove();
 }
 
 function cleanup() {
+  intentionallyClosed = true;
+  clearHeartbeat();
+  clearReconnectTimer();
   navigator.mediaDevices?.removeEventListener('devicechange', loadDevices);
   for (const userId of peers.keys()) {
     closePeer(userId);
   }
   stopLocalAudio();
+  void stopScreenShare();
   micStarted.value = false;
   socket?.close();
   socket = null;
@@ -558,6 +705,17 @@ function initials(userId: string) {
             <Settings :size="20" />
           </button>
 
+          <button
+            type="button"
+            class="icon-button"
+            :class="{ active: sharingScreen }"
+            :data-tooltip="sharingScreen ? 'Stop sharing' : 'Share screen'"
+            :title="sharingScreen ? 'Stop screen share' : 'Share screen'"
+            @click="toggleScreenShare"
+          >
+            <MonitorUp :size="20" />
+          </button>
+
           <button type="button" class="icon-button leave-button" data-tooltip="Leave room" title="Leave room" @click="leave">
             <PhoneOff :size="20" />
           </button>
@@ -593,6 +751,8 @@ function initials(userId: string) {
           </div>
         </div>
       </section>
+
+      <section ref="screenShareHost" class="screen-share-grid" aria-label="Screen shares"></section>
     </main>
 
     <aside class="member-sidebar">

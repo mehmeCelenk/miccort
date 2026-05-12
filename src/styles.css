@@ -300,7 +300,7 @@ h2 {
 
 .voice-stage {
   display: grid;
-  grid-template-rows: auto auto minmax(0, 1fr);
+  grid-template-rows: auto auto auto minmax(0, 1fr);
   min-width: 0;
   min-height: 0;
   gap: 14px;
@@ -361,6 +361,44 @@ h2 {
 .room-presence {
   display: grid;
   gap: 8px;
+}
+
+.screen-share-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 14px;
+  min-height: 0;
+}
+
+.screen-share-grid:empty {
+  display: none;
+}
+
+.screen-share-tile {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  border: 1px solid #30363b;
+  border-radius: 8px;
+  padding: 10px;
+  background: #101315;
+}
+
+.screen-share-tile strong {
+  min-width: 0;
+  overflow: hidden;
+  color: #d8dfdc;
+  font-size: 0.86rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.screen-share-tile video {
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  border-radius: 6px;
+  background: #050607;
+  object-fit: contain;
 }
 
 .presence-row {
@@ -440,7 +478,7 @@ h2 {
 
 .dock-actions {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   align-items: center;
   gap: 8px;
 }

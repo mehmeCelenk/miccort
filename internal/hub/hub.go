@@ -45,6 +45,8 @@ func (h *Hub) Handle(client *Client, msg Message) {
 		}
 		_ = json.Unmarshal(msg.Payload, &payload)
 		h.Join(client, msg.RoomID, msg.UserID, payload.DisplayName)
+	case "ping":
+		client.send(Message{Type: "pong", RoomID: client.RoomID, UserID: client.UserID})
 	case "offer", "answer", "ice-candidate":
 		h.forward(client, msg)
 	default:

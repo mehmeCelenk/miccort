@@ -8,6 +8,8 @@ type SignalType =
   | "answer"
   | "ice-candidate"
   | "room-users"
+  | "ping"
+  | "pong"
   | "error";
 
 interface SignalMessage {
@@ -98,6 +100,9 @@ export class SignalingHub extends DurableObject<Env> {
     switch (message.type) {
       case "join-room":
         this.join(socket, message.roomId, message.userId, readDisplayName(message.payload));
+        break;
+      case "ping":
+        this.pong(socket);
         break;
       case "offer":
       case "answer":
@@ -200,6 +205,15 @@ export class SignalingHub extends DurableObject<Env> {
       ...message,
       roomId: session.roomId,
       userId: session.userId,
+    });
+  }
+
+  private pong(socket: WebSocket) {
+    const session = this.sessions.get(socket);
+    this.send(socket, {
+      type: "pong",
+      roomId: session?.roomId,
+      userId: session?.userId,
     });
   }
 
