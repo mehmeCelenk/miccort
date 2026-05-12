@@ -10,6 +10,8 @@
     "tauri": "tauri"
   },
   "dependencies": {
+    "@tauri-apps/plugin-process": "^2.3.1",
+    "@tauri-apps/plugin-updater": "^2.10.1",
     "@vitejs/plugin-vue": "^5.2.4",
     "lucide-vue-next": "^1.0.0",
     "typescript": "^5.8.3",
