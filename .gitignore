@@ -2,3 +2,4 @@ node_modules/
 dist/
 .gocache/
 src-tauri/target/
+.env

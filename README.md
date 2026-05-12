@@ -82,3 +82,21 @@ Desktop clients should then use:
 ```text
 ws://SERVER_IP:8081/ws
 ```
+
+## Cloudflare Workers Backend
+
+An alternative signaling backend lives in `cloudflare-signaling/`. It uses Cloudflare Workers + Durable Objects and keeps the same WebSocket message contract as the Go backend.
+
+```bash
+cd cloudflare-signaling
+npm install
+npm run deploy
+```
+
+Desktop clients can then use:
+
+```text
+wss://miccort-signaling.<your-subdomain>.workers.dev/ws
+```
+
+The Cloudflare backend is also signaling-only. WebRTC audio remains peer-to-peer.
