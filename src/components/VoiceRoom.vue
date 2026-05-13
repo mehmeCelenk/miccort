@@ -41,6 +41,8 @@ interface RemoteScreenShare {
   stream: MediaStream;
 }
 
+type SenderSource = 'mic' | 'screen';
+
 const props = defineProps<{
   roomId: string;
   serverUrl: string;
@@ -69,6 +71,7 @@ const outputDevices = ref<MediaDeviceInfo[]>([]);
 const selectedInputId = ref('');
 const selectedOutputId = ref('');
 const inputGain = ref(100);
+const inputSensitivity = ref(0);
 const outputVolume = ref(100);
 const noiseSuppression = ref(true);
 const echoCancellation = ref(true);
@@ -89,6 +92,9 @@ let localStream: MediaStream | null = null;
 let screenStream: MediaStream | null = null;
 let audioContext: AudioContext | null = null;
 let micGainNode: GainNode | null = null;
+let micSensitivityNode: GainNode | null = null;
+let micSensitivityAnalyser: AnalyserNode | null = null;
+let micSensitivityTimer: number | undefined;
 let reconnectTimer: number | undefined;
 let heartbeatTimer: number | undefined;
 let intentionallyClosed = false;
@@ -96,6 +102,12 @@ const peers = new Map<string, RTCPeerConnection>();
 const queuedCandidates = new Map<string, RTCIceCandidateInit[]>();
 const remoteAnalyzers = new Map<string, { context: AudioContext; timer: number }>();
 const screenVideoElements = new Map<string, HTMLVideoElement>();
+const senderSources = new WeakMap<RTCRtpSender, SenderSource>();
+const screenShareVideoConstraints: MediaTrackConstraints = {
+  frameRate: { ideal: 15, max: 20 },
+  width: { ideal: 1280, max: 1920 },
+  height: { ideal: 720, max: 1080 },
+};
 
 const otherUsers = computed(() => users.value.filter((userId) => userId !== currentUserId.value));
 const connectionLabel = computed(() => (wsOpen.value ? 'Connected' : 'Offline'));
@@ -248,8 +260,11 @@ async function restartMicrophone() {
   for (const peer of peers.values()) {
     const nextTrack = localStream?.getAudioTracks()[0] ?? null;
     for (const sender of peer.getSenders()) {
-      if (sender.track?.kind === 'audio') {
+      if (senderSources.get(sender) === 'mic') {
         await sender.replaceTrack(nextTrack);
+        if (nextTrack) {
+          configureSender(sender, nextTrack, 'mic');
+        }
       }
     }
   }
@@ -272,16 +287,63 @@ async function openMicrophone() {
 function buildProcessedMicrophoneStream(stream: MediaStream) {
   audioContext = new AudioContext();
   const source = audioContext.createMediaStreamSource(stream);
+  micSensitivityNode = audioContext.createGain();
+  micSensitivityAnalyser = audioContext.createAnalyser();
   micGainNode = audioContext.createGain();
   const destination = audioContext.createMediaStreamDestination();
-  source.connect(micGainNode);
+
+  micSensitivityAnalyser.fftSize = 1024;
+  micSensitivityNode.gain.value = 1;
+
+  source.connect(micSensitivityAnalyser);
+  source.connect(micSensitivityNode);
+  micSensitivityNode.connect(micGainNode);
   micGainNode.connect(destination);
+  startInputSensitivityMonitor();
   return destination.stream;
 }
 
 function updateMicGain() {
   if (micGainNode) {
     micGainNode.gain.value = inputGain.value / 100;
+  }
+}
+
+function startInputSensitivityMonitor() {
+  stopInputSensitivityMonitor();
+  if (!audioContext || !micSensitivityNode || !micSensitivityAnalyser) {
+    return;
+  }
+
+  const samples = new Uint8Array(micSensitivityAnalyser.fftSize);
+  micSensitivityTimer = window.setInterval(() => {
+    if (!audioContext || !micSensitivityNode || !micSensitivityAnalyser) {
+      return;
+    }
+
+    if (inputSensitivity.value <= 0 || muted.value) {
+      micSensitivityNode.gain.setTargetAtTime(1, audioContext.currentTime, 0.025);
+      return;
+    }
+
+    micSensitivityAnalyser.getByteTimeDomainData(samples);
+    let total = 0;
+    for (const sample of samples) {
+      const centered = (sample - 128) / 128;
+      total += centered * centered;
+    }
+
+    const rms = Math.sqrt(total / samples.length);
+    const threshold = inputSensitivity.value / 100;
+    const targetGain = rms < threshold ? 0.04 : 1;
+    micSensitivityNode.gain.setTargetAtTime(targetGain, audioContext.currentTime, targetGain === 1 ? 0.015 : 0.08);
+  }, 60);
+}
+
+function stopInputSensitivityMonitor() {
+  if (micSensitivityTimer) {
+    window.clearInterval(micSensitivityTimer);
+    micSensitivityTimer = undefined;
   }
 }
 
@@ -417,8 +479,8 @@ async function ensurePeer(userId: string, makeOffer: boolean) {
 
   if (localStream) {
     for (const track of localStream.getAudioTracks()) {
-      if (!peer.getSenders().some((sender) => sender.track === track)) {
-        peer.addTrack(track, localStream);
+      if (!peer.getSenders().some((sender) => senderSources.get(sender) === 'mic')) {
+        addSender(peer, track, localStream, 'mic');
       }
     }
   }
@@ -426,7 +488,7 @@ async function ensurePeer(userId: string, makeOffer: boolean) {
   if (screenStream) {
     for (const track of screenStream.getTracks()) {
       if (!peer.getSenders().some((sender) => sender.track === track)) {
-        peer.addTrack(track, screenStream);
+        addSender(peer, track, screenStream, 'screen');
       }
     }
   }
@@ -598,12 +660,13 @@ async function startScreenShare() {
   try {
     error.value = '';
     screenStream = await navigator.mediaDevices.getDisplayMedia({
-      video: true,
+      video: screenShareVideoConstraints,
       audio: true,
     });
     sharingScreen.value = true;
 
     const [track] = screenStream.getVideoTracks();
+    await track?.applyConstraints(screenShareVideoConstraints).catch(() => undefined);
     track.addEventListener('ended', () => {
       void stopScreenShare();
     });
@@ -616,6 +679,34 @@ async function startScreenShare() {
   }
 }
 
+function addSender(peer: RTCPeerConnection, track: MediaStreamTrack, stream: MediaStream, source: SenderSource) {
+  const sender = peer.addTrack(track, stream);
+  senderSources.set(sender, source);
+  configureSender(sender, track, source);
+  return sender;
+}
+
+function configureSender(sender: RTCRtpSender, track: MediaStreamTrack, source: SenderSource) {
+  const parameters = sender.getParameters();
+  parameters.encodings = parameters.encodings?.length ? parameters.encodings : [{}];
+
+  if (track.kind === 'video') {
+    parameters.degradationPreference = 'maintain-framerate';
+    parameters.encodings[0] = {
+      ...parameters.encodings[0],
+      maxBitrate: 1_500_000,
+      maxFramerate: 20,
+    };
+  } else if (track.kind === 'audio' && source === 'screen') {
+    parameters.encodings[0] = {
+      ...parameters.encodings[0],
+      maxBitrate: 64_000,
+    };
+  }
+
+  void sender.setParameters(parameters).catch(() => undefined);
+}
+
 async function stopScreenShare() {
   const stoppedStream = screenStream;
   const stoppedTrackIds = new Set(stoppedStream?.getTracks().map((track) => track.id) ?? []);
@@ -626,6 +717,7 @@ async function stopScreenShare() {
   for (const [userId, peer] of peers) {
     for (const sender of peer.getSenders()) {
       if (sender.track && stoppedTrackIds.has(sender.track.id)) {
+        senderSources.delete(sender);
         peer.removeTrack(sender);
       }
     }
@@ -732,9 +824,12 @@ function stopLocalAudio() {
   stopSpeakingDetection(currentUserId.value);
   rawLocalStream?.getTracks().forEach((track) => track.stop());
   localStream?.getTracks().forEach((track) => track.stop());
+  stopInputSensitivityMonitor();
   rawLocalStream = null;
   localStream = null;
   micGainNode = null;
+  micSensitivityNode = null;
+  micSensitivityAnalyser = null;
   void audioContext?.close();
   audioContext = null;
 }
@@ -1058,6 +1153,12 @@ function initials(userId: string) {
           Mic gain
           <input v-model.number="inputGain" type="range" min="0" max="200" @input="updateMicGain" />
           <small>{{ inputGain }}%</small>
+        </label>
+
+        <label>
+          Input sensitivity
+          <input v-model.number="inputSensitivity" type="range" min="0" max="10" step="0.5" />
+          <small>{{ inputSensitivity > 0 ? `${inputSensitivity}%` : 'Off' }}</small>
         </label>
 
         <label>
