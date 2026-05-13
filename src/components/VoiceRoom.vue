@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue';
-import { Headphones, MonitorUp, Mic, MicOff, PhoneOff, Settings, Volume2, VolumeX, X } from 'lucide-vue-next';
+import { Headphones, Maximize2, Minimize2, MonitorUp, Mic, MicOff, PhoneOff, Settings, Volume2, VolumeX, X } from 'lucide-vue-next';
 
 type SignalType =
   | 'join-room'
@@ -36,6 +36,11 @@ interface UserSummary {
   displayName?: string;
 }
 
+interface RemoteScreenShare {
+  userId: string;
+  stream: MediaStream;
+}
+
 const props = defineProps<{
   roomId: string;
   serverUrl: string;
@@ -59,7 +64,6 @@ const settingsOpen = ref(false);
 const sharingScreen = ref(false);
 const wsOpen = ref(false);
 const remoteAudio = ref<HTMLDivElement | null>(null);
-const screenShareHost = ref<HTMLDivElement | null>(null);
 const inputDevices = ref<MediaDeviceInfo[]>([]);
 const outputDevices = ref<MediaDeviceInfo[]>([]);
 const selectedInputId = ref('');
@@ -74,6 +78,10 @@ const userNames = reactive<Record<string, string>>({});
 const memberVolumes = reactive<Record<string, number>>({});
 const screenVolumes = reactive<Record<string, number>>({});
 const speakingUsers = reactive<Record<string, boolean>>({});
+const remoteScreens = ref<RemoteScreenShare[]>([]);
+const activeMemberVolumeUser = ref<string | null>(null);
+const activeScreenMenuUser = ref<string | null>(null);
+const fullscreenScreenUser = ref<string | null>(null);
 
 let socket: WebSocket | null = null;
 let rawLocalStream: MediaStream | null = null;
@@ -87,6 +95,7 @@ let intentionallyClosed = false;
 const peers = new Map<string, RTCPeerConnection>();
 const queuedCandidates = new Map<string, RTCIceCandidateInit[]>();
 const remoteAnalyzers = new Map<string, { context: AudioContext; timer: number }>();
+const screenVideoElements = new Map<string, HTMLVideoElement>();
 
 const otherUsers = computed(() => users.value.filter((userId) => userId !== currentUserId.value));
 const roomTag = computed(() => props.roomId.slice(0, 2).toUpperCase());
@@ -102,6 +111,7 @@ onMounted(() => {
   connect();
   void startMicrophone();
   void loadDevices();
+  window.addEventListener('keydown', handleKeydown);
   navigator.mediaDevices?.addEventListener('devicechange', loadDevices);
 });
 onBeforeUnmount(cleanup);
@@ -543,9 +553,38 @@ function setMemberVolumeFromEvent(userId: string, event: Event) {
   setMemberVolume(userId, Number((event.target as HTMLInputElement).value));
 }
 
+function toggleMemberVolumePopover(userId: string) {
+  if (userId === currentUserId.value) {
+    return;
+  }
+  activeScreenMenuUser.value = null;
+  activeMemberVolumeUser.value = activeMemberVolumeUser.value === userId ? null : userId;
+}
+
 function setScreenVolume(userId: string, value: number) {
   screenVolumes[userId] = value;
   updateRemoteAudioSettings();
+}
+
+function setScreenVolumeFromEvent(userId: string, event: Event) {
+  setScreenVolume(userId, Number((event.target as HTMLInputElement).value));
+}
+
+function openScreenMenu(userId: string) {
+  activeMemberVolumeUser.value = null;
+  activeScreenMenuUser.value = userId;
+}
+
+function closePopovers() {
+  activeMemberVolumeUser.value = null;
+  activeScreenMenuUser.value = null;
+}
+
+function handleKeydown(event: KeyboardEvent) {
+  if (event.key === 'Escape') {
+    fullscreenScreenUser.value = null;
+    closePopovers();
+  }
 }
 
 async function toggleScreenShare() {
@@ -606,64 +645,59 @@ async function stopScreenShare() {
 }
 
 function attachRemoteScreen(userId: string, stream: MediaStream) {
-  const host = screenShareHost.value;
-  if (!host) {
-    return;
-  }
-
-  const existing = host.querySelector<HTMLVideoElement>(`video[data-user-id="${userId}"]`);
+  const existing = remoteScreens.value.find((share) => share.userId === userId);
   if (existing) {
-    existing.srcObject = stream;
+    existing.stream = stream;
+    const video = screenVideoElements.get(userId);
+    if (video) {
+      video.srcObject = stream;
+    }
     return;
   }
 
-  const wrap = document.createElement('div');
-  wrap.className = 'screen-share-tile';
-  wrap.dataset.userId = userId;
+  remoteScreens.value = [...remoteScreens.value, { userId, stream }];
 
-  const label = document.createElement('strong');
-  label.textContent = `${displayName(userId)} is sharing`;
-
-  const controls = document.createElement('label');
-  controls.className = 'screen-volume-control';
-  controls.textContent = 'Share audio';
-  const volumeIcon = document.createElement('span');
-  volumeIcon.textContent = '';
-  const volume = document.createElement('input');
-  volume.type = 'range';
-  volume.min = '0';
-  volume.max = '100';
-  volume.value = String(screenVolumes[userId] ?? 100);
-  volume.addEventListener('input', () => {
-    setScreenVolume(userId, Number(volume.value));
-  });
-  controls.append(volumeIcon, volume);
-
-  const video = document.createElement('video');
-  video.dataset.userId = userId;
-  video.autoplay = true;
-  video.playsInline = true;
-  video.muted = true;
-  video.srcObject = stream;
-
-  wrap.append(label, controls, video);
-  host.appendChild(wrap);
-
-  const removeTile = () => {
-    wrap.remove();
-    remoteAudio.value?.querySelectorAll(`[data-user-id="${userId}"][data-source="screen"]`).forEach((element) => element.remove());
-  };
-  stream.getVideoTracks()[0]?.addEventListener('ended', removeTile);
+  stream.getVideoTracks()[0]?.addEventListener('ended', () => removeRemoteScreen(userId));
   stream.addEventListener('removetrack', () => {
     if (!stream.getVideoTracks().some((track) => track.readyState === 'live')) {
-      removeTile();
+      removeRemoteScreen(userId);
     }
   });
   window.setTimeout(() => {
     if (!stream.getVideoTracks().some((track) => track.readyState === 'live')) {
-      removeTile();
+      removeRemoteScreen(userId);
     }
   }, 0);
+}
+
+function setScreenVideoElement(element: Element | null, userId: string) {
+  if (!(element instanceof HTMLVideoElement)) {
+    screenVideoElements.delete(userId);
+    return;
+  }
+  screenVideoElements.set(userId, element);
+  const share = remoteScreens.value.find((item) => item.userId === userId);
+  if (share && element.srcObject !== share.stream) {
+    element.srcObject = share.stream;
+  }
+}
+
+function removeRemoteScreen(userId: string) {
+  remoteScreens.value = remoteScreens.value.filter((share) => share.userId !== userId);
+  screenVideoElements.delete(userId);
+  remoteAudio.value?.querySelectorAll(`[data-user-id="${userId}"][data-source="screen"]`).forEach((element) => element.remove());
+  delete screenVolumes[userId];
+  if (activeScreenMenuUser.value === userId) {
+    activeScreenMenuUser.value = null;
+  }
+  if (fullscreenScreenUser.value === userId) {
+    fullscreenScreenUser.value = null;
+  }
+}
+
+function toggleScreenFullscreen(userId: string) {
+  fullscreenScreenUser.value = fullscreenScreenUser.value === userId ? null : userId;
+  activeScreenMenuUser.value = null;
 }
 
 function closePeer(userId: string) {
@@ -675,14 +709,15 @@ function closePeer(userId: string) {
   delete screenVolumes[userId];
   delete speakingUsers[userId];
   stopSpeakingDetection(userId);
+  removeRemoteScreen(userId);
   remoteAudio.value?.querySelectorAll(`[data-user-id="${userId}"]`).forEach((element) => element.remove());
-  screenShareHost.value?.querySelectorAll(`[data-user-id="${userId}"]`).forEach((element) => element.remove());
 }
 
 function cleanup() {
   intentionallyClosed = true;
   clearHeartbeat();
   clearReconnectTimer();
+  window.removeEventListener('keydown', handleKeydown);
   navigator.mediaDevices?.removeEventListener('devicechange', loadDevices);
   for (const userId of peers.keys()) {
     closePeer(userId);
@@ -788,7 +823,7 @@ function initials(userId: string) {
 </script>
 
 <template>
-  <section class="room-shell">
+  <section class="room-shell" @click="closePopovers">
     <aside class="server-rail" aria-label="Workspace switcher">
       <div class="server-pill active">{{ roomTag }}</div>
       <div class="server-pill">+</div>
@@ -796,9 +831,52 @@ function initials(userId: string) {
     </aside>
 
     <aside class="channel-sidebar">
-      <div class="workspace-card">
-        <p class="eyebrow">Mikcort</p>
-        <strong>Room {{ roomId }}</strong>
+      <div class="deck-members">
+        <div class="panel-heading">
+          <h2>Members</h2>
+          <span>{{ users.length }}</span>
+        </div>
+        <ul class="user-list">
+          <li
+            v-for="userId in users"
+            :key="userId"
+            :class="{ speaking: speakingUsers[userId], selected: activeMemberVolumeUser === userId }"
+            @click.stop="toggleMemberVolumePopover(userId)"
+          >
+            <span class="avatar">{{ initials(userId) }}</span>
+            <div class="member-info">
+              <strong>{{ displayName(userId) }}</strong>
+              <small>{{ userId === currentUserId ? (deafened ? 'deafened' : muted ? 'muted' : 'local') : peerStates[userId] ?? 'waiting' }}</small>
+            </div>
+            <button
+              v-if="userId !== currentUserId"
+              type="button"
+              class="icon-button compact-button member-volume-button"
+              :class="{ selected: activeMemberVolumeUser === userId }"
+              data-tooltip="Volume"
+              title="Member volume"
+            >
+              <Volume2 :size="16" />
+            </button>
+            <div v-if="activeMemberVolumeUser === userId" class="member-popover popover-panel" @click.stop>
+              <strong>{{ displayName(userId) }}</strong>
+              <label class="popover-slider">
+                <span>
+                  <Volume2 :size="15" />
+                  Volume
+                </span>
+                <input
+                  type="range"
+                  min="0"
+                  max="100"
+                  :value="memberVolumes[userId] ?? 100"
+                  @input="setMemberVolumeFromEvent(userId, $event)"
+                />
+                <small>{{ memberVolumes[userId] ?? 100 }}%</small>
+              </label>
+            </div>
+          </li>
+        </ul>
       </div>
 
       <div class="voice-dock">
@@ -870,6 +948,7 @@ function initials(userId: string) {
         <div>
           <p class="eyebrow">Voice channel</p>
           <h1>Lounge</h1>
+          <small class="stage-room-id">Room {{ roomId }}</small>
         </div>
         <div class="connection-pill">
           <span :class="['dot', wsOpen ? 'online' : 'offline']"></span>
@@ -894,34 +973,63 @@ function initials(userId: string) {
         </div>
       </section>
 
-      <section ref="screenShareHost" class="screen-share-grid" aria-label="Screen shares"></section>
-    </main>
-
-    <aside class="member-sidebar">
-      <div class="panel-heading">
-        <h2>Members</h2>
-        <span>{{ users.length }}</span>
-      </div>
-      <ul class="user-list">
-        <li v-for="userId in users" :key="userId" :class="{ speaking: speakingUsers[userId] }">
-          <span class="avatar">{{ initials(userId) }}</span>
-          <div class="member-info">
-            <strong>{{ displayName(userId) }}</strong>
-            <small>{{ userId === currentUserId ? (deafened ? 'deafened' : muted ? 'muted' : 'local') : peerStates[userId] ?? 'waiting' }}</small>
+      <section v-if="remoteScreens.length" class="screen-share-grid" aria-label="Screen shares">
+        <article
+          v-for="share in remoteScreens"
+          :key="share.userId"
+          :class="['screen-share-tile', { fullscreen: fullscreenScreenUser === share.userId }]"
+          @contextmenu.prevent.stop="openScreenMenu(share.userId)"
+          @click.stop="closePopovers"
+        >
+          <div class="screen-share-header">
+            <strong>{{ displayName(share.userId) }} is sharing</strong>
+            <button
+              type="button"
+              class="icon-button compact-button"
+              :data-tooltip="fullscreenScreenUser === share.userId ? 'Exit fullscreen' : 'Fullscreen'"
+              :title="fullscreenScreenUser === share.userId ? 'Exit fullscreen' : 'Fullscreen'"
+              @click.stop="toggleScreenFullscreen(share.userId)"
+            >
+              <Minimize2 v-if="fullscreenScreenUser === share.userId" :size="18" />
+              <Maximize2 v-else :size="18" />
+            </button>
           </div>
-          <label v-if="userId !== currentUserId" class="member-volume" :title="`${displayName(userId)} volume`">
-            <Volume2 :size="15" />
-            <input
-              type="range"
-              min="0"
-              max="100"
-              :value="memberVolumes[userId] ?? 100"
-              @input="setMemberVolumeFromEvent(userId, $event)"
-            />
-          </label>
-        </li>
-      </ul>
-    </aside>
+
+          <div class="screen-video-wrap">
+            <video
+              :ref="(element) => setScreenVideoElement(element as Element | null, share.userId)"
+              :data-user-id="share.userId"
+              autoplay
+              playsinline
+              muted
+              @dblclick.stop="toggleScreenFullscreen(share.userId)"
+            ></video>
+
+            <div v-if="activeScreenMenuUser === share.userId" class="screen-menu popover-panel" @click.stop>
+              <button type="button" class="menu-action" @click="toggleScreenFullscreen(share.userId)">
+                <Minimize2 v-if="fullscreenScreenUser === share.userId" :size="16" />
+                <Maximize2 v-else :size="16" />
+                {{ fullscreenScreenUser === share.userId ? 'Exit fullscreen' : 'Fullscreen' }}
+              </button>
+              <label class="popover-slider">
+                <span>
+                  <Volume2 :size="15" />
+                  Share audio
+                </span>
+                <input
+                  type="range"
+                  min="0"
+                  max="100"
+                  :value="screenVolumes[share.userId] ?? 100"
+                  @input="setScreenVolumeFromEvent(share.userId, $event)"
+                />
+                <small>{{ screenVolumes[share.userId] ?? 100 }}%</small>
+              </label>
+            </div>
+          </div>
+        </article>
+      </section>
+    </main>
 
     <aside v-if="settingsOpen" class="settings-drawer" aria-label="Audio settings">
       <div class="drawer-header">
