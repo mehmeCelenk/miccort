@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"sort"
 	"sync"
 
 	"mikcort/internal/room"
@@ -22,6 +23,11 @@ type Client struct {
 	DisplayName string
 	RoomID      string
 	Send        chan []byte
+}
+
+type RoomSummary struct {
+	ID    string   `json:"id"`
+	Users []string `json:"users"`
 }
 
 type Hub struct {
@@ -146,6 +152,36 @@ func (h *Hub) Leave(client *Client) {
 	for _, other := range others {
 		other.send(left)
 	}
+}
+
+func (h *Hub) Rooms() []RoomSummary {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+
+	rooms := make([]RoomSummary, 0, len(h.rooms))
+	for roomID, r := range h.rooms {
+		users := make([]string, 0, len(r.UserIDs()))
+		for _, userID := range r.UserIDs() {
+			client := h.clients[roomID][userID]
+			if client == nil {
+				continue
+			}
+			users = append(users, client.DisplayName)
+		}
+		if len(users) == 0 {
+			continue
+		}
+		sort.Strings(users)
+		rooms = append(rooms, RoomSummary{
+			ID:    roomID,
+			Users: users,
+		})
+	}
+
+	sort.Slice(rooms, func(i, j int) bool {
+		return rooms[i].ID < rooms[j].ID
+	})
+	return rooms
 }
 
 func (h *Hub) forward(client *Client, msg Message) {

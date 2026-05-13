@@ -36,6 +36,11 @@ interface UserSummary {
   displayName: string;
 }
 
+interface RoomSummary {
+  id: string;
+  users: string[];
+}
+
 export interface Env {
   SIGNALING_HUB: DurableObjectNamespace<SignalingHub>;
 }
@@ -45,6 +50,14 @@ export default {
     const url = new URL(request.url);
     if (url.pathname === "/healthz") {
       return new Response("ok");
+    }
+
+    if (url.pathname === "/rooms") {
+      if (request.method === "OPTIONS") {
+        return withCors(new Response(null, { status: 204 }));
+      }
+      const id = env.SIGNALING_HUB.idFromName("global");
+      return env.SIGNALING_HUB.get(id).fetch(request);
     }
 
     if (url.pathname !== "/ws") {
@@ -65,6 +78,15 @@ export class SignalingHub extends DurableObject<Env> {
   private rooms = new Map<string, Map<string, ClientSession>>();
 
   fetch(request: Request) {
+    const url = new URL(request.url);
+    if (url.pathname === "/rooms") {
+      if (request.method !== "GET") {
+        return withCors(new Response("method not allowed", { status: 405 }));
+      }
+
+      return withCors(Response.json({ rooms: this.roomSummaries() }));
+    }
+
     if (request.headers.get("Upgrade") !== "websocket") {
       return new Response("expected websocket upgrade", { status: 426 });
     }
@@ -217,6 +239,19 @@ export class SignalingHub extends DurableObject<Env> {
     });
   }
 
+  private roomSummaries(): RoomSummary[] {
+    return [...this.rooms.entries()]
+      .map(([id, room]) => ({
+        id,
+        users: [...room.values()]
+          .map((session) => session.displayName)
+          .filter(Boolean)
+          .sort((a, b) => a.localeCompare(b)),
+      }))
+      .filter((room) => room.users.length > 0)
+      .sort((a, b) => a.id.localeCompare(b.id));
+  }
+
   private broadcast(roomId: string, message: SignalMessage, exceptUserId?: string) {
     const room = this.rooms.get(roomId);
     if (!room) {
@@ -252,4 +287,16 @@ function toUserSummary(session: ClientSession): UserSummary {
     id: session.userId,
     displayName: session.displayName,
   };
+}
+
+function withCors(response: Response) {
+  const headers = new Headers(response.headers);
+  headers.set("Access-Control-Allow-Origin", "*");
+  headers.set("Access-Control-Allow-Methods", "GET, OPTIONS");
+  headers.set("Access-Control-Allow-Headers", "Content-Type");
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers,
+  });
 }

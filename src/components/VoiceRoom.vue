@@ -98,7 +98,6 @@ const remoteAnalyzers = new Map<string, { context: AudioContext; timer: number }
 const screenVideoElements = new Map<string, HTMLVideoElement>();
 
 const otherUsers = computed(() => users.value.filter((userId) => userId !== currentUserId.value));
-const roomTag = computed(() => props.roomId.slice(0, 2).toUpperCase());
 const connectionLabel = computed(() => (wsOpen.value ? 'Connected' : 'Offline'));
 const voiceState = computed(() => {
   if (!micStarted.value) {
@@ -824,12 +823,6 @@ function initials(userId: string) {
 
 <template>
   <section class="room-shell" @click="closePopovers">
-    <aside class="server-rail" aria-label="Workspace switcher">
-      <div class="server-pill active">{{ roomTag }}</div>
-      <div class="server-pill">+</div>
-      <div class="server-pill muted-pill">?</div>
-    </aside>
-
     <aside class="channel-sidebar">
       <div class="deck-members">
         <div class="panel-heading">

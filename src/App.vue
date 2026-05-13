@@ -1,6 +1,12 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
+import { Plus, RefreshCw, Users } from 'lucide-vue-next';
 import VoiceRoom from './components/VoiceRoom.vue';
+
+interface RoomSummary {
+  id: string;
+  users: string[];
+}
 
 const roomId = ref('');
 const serverUrl = ref('ws://localhost:8080/ws');
@@ -8,6 +14,10 @@ const displayName = ref('');
 const activeRoomId = ref('');
 const updateMessage = ref('');
 const updateTone = ref<'info' | 'success' | 'error'>('info');
+const rooms = ref<RoomSummary[]>([]);
+const roomsLoading = ref(false);
+const roomsError = ref('');
+let roomRefreshTimer: number | undefined;
 
 const canJoin = computed(
   () =>
@@ -15,13 +25,22 @@ const canJoin = computed(
     serverUrl.value.trim().length > 0 &&
     displayName.value.trim().length > 0,
 );
+const canCreate = computed(() => serverUrl.value.trim().length > 0 && displayName.value.trim().length > 0);
+const roomsEndpoint = computed(() => buildRoomsEndpoint(serverUrl.value));
 
 onMounted(() => {
   window.addEventListener('mikcort:update-status', handleUpdateStatus);
+  void loadRooms();
+  roomRefreshTimer = window.setInterval(() => {
+    void loadRooms();
+  }, 5000);
 });
 
 onBeforeUnmount(() => {
   window.removeEventListener('mikcort:update-status', handleUpdateStatus);
+  if (roomRefreshTimer) {
+    window.clearInterval(roomRefreshTimer);
+  }
 });
 
 function createRoom() {
@@ -36,8 +55,14 @@ function joinRoom() {
   activeRoomId.value = roomId.value.trim();
 }
 
+function joinExistingRoom(room: RoomSummary) {
+  roomId.value = room.id;
+  joinRoom();
+}
+
 function leaveRoom() {
   activeRoomId.value = '';
+  void loadRooms();
 }
 
 function handleUpdateStatus(event: Event) {
@@ -51,6 +76,44 @@ function handleUpdateStatus(event: Event) {
         updateMessage.value = '';
       }
     }, 5000);
+  }
+}
+
+async function loadRooms() {
+  const endpoint = roomsEndpoint.value;
+  if (!endpoint) {
+    rooms.value = [];
+    roomsError.value = 'Server address is not valid.';
+    return;
+  }
+
+  roomsLoading.value = true;
+  roomsError.value = '';
+  try {
+    const response = await fetch(endpoint);
+    if (!response.ok) {
+      throw new Error(`Room list failed with ${response.status}`);
+    }
+    const data = (await response.json()) as { rooms?: RoomSummary[] };
+    rooms.value = (data.rooms ?? []).filter((room) => room.users.length > 0);
+  } catch {
+    rooms.value = [];
+    roomsError.value = 'Rooms could not be loaded from this server.';
+  } finally {
+    roomsLoading.value = false;
+  }
+}
+
+function buildRoomsEndpoint(value: string) {
+  try {
+    const url = new URL(value.trim());
+    url.protocol = url.protocol === 'wss:' ? 'https:' : 'http:';
+    url.pathname = '/rooms';
+    url.search = '';
+    url.hash = '';
+    return url.toString();
+  } catch {
+    return '';
   }
 }
 </script>
@@ -84,18 +147,43 @@ function handleUpdateStatus(event: Event) {
 
           <label>
             Signaling server
-            <input v-model="serverUrl" autocomplete="off" />
+            <input v-model="serverUrl" autocomplete="off" @change="loadRooms" />
           </label>
 
-          <label>
-            Room ID
-            <input v-model="roomId" autocomplete="off" placeholder="room-123" @keyup.enter="joinRoom" />
-          </label>
+          <div class="room-browser">
+            <div class="room-browser-heading">
+              <div>
+                <span>Available rooms</span>
+                <small>{{ rooms.length ? `${rooms.length} live` : 'No live rooms' }}</small>
+              </div>
+              <button type="button" class="icon-button compact-button" data-tooltip="Refresh rooms" title="Refresh rooms" @click="loadRooms">
+                <RefreshCw :size="16" />
+              </button>
+            </div>
+
+            <div v-if="roomsLoading" class="room-empty">Loading rooms...</div>
+            <div v-else-if="roomsError" class="room-empty error-lite">{{ roomsError }}</div>
+            <div v-else-if="!rooms.length" class="room-empty">Create a room to start the first conversation.</div>
+            <template v-else>
+              <button v-for="room in rooms" :key="room.id" type="button" class="room-row" :disabled="!canCreate" @click="joinExistingRoom(room)">
+                <span class="room-row-mark">
+                  <Users :size="17" />
+                </span>
+                <span class="room-row-body">
+                  <strong>Room {{ room.id }}</strong>
+                  <small>{{ room.users.join(', ') }}</small>
+                </span>
+                <span class="room-row-count">{{ room.users.length }}</span>
+              </button>
+            </template>
+          </div>
         </div>
 
         <div class="actions">
-          <button type="button" class="secondary" @click="createRoom">Create room</button>
-          <button type="button" :disabled="!canJoin" @click="joinRoom">Join room</button>
+          <button type="button" class="secondary action-with-icon" :disabled="!canCreate" @click="createRoom">
+            <Plus :size="17" />
+            Create room
+          </button>
         </div>
       </div>
     </section>

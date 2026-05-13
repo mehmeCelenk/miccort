@@ -248,6 +248,112 @@ h2 {
   background: #1c2024;
 }
 
+.room-browser {
+  display: grid;
+  gap: 8px;
+}
+
+.room-browser-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+  color: #d8dfdc;
+  font-size: 0.86rem;
+  font-weight: 850;
+}
+
+.room-browser-heading > div {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.room-browser-heading small,
+.room-empty,
+.room-row small {
+  color: #aeb9b4;
+}
+
+.room-empty {
+  display: grid;
+  min-height: 58px;
+  place-items: center;
+  border: 1px dashed #3d464c;
+  border-radius: 8px;
+  padding: 12px;
+  background: #151719;
+  font-size: 0.84rem;
+  font-weight: 750;
+  text-align: center;
+}
+
+.room-empty.error-lite {
+  color: #ffdce2;
+  border-color: rgba(217, 79, 103, 0.42);
+  background: rgba(217, 79, 103, 0.12);
+}
+
+.room-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  min-height: 60px;
+  border: 1px solid #30363b;
+  border-radius: 8px;
+  padding: 10px;
+  color: #f4f7f5;
+  background: #252a2f;
+  text-align: left;
+}
+
+.room-row:hover {
+  border-color: rgba(157, 242, 198, 0.58);
+}
+
+.room-row-mark {
+  display: grid;
+  width: 34px;
+  height: 34px;
+  place-items: center;
+  border-radius: 10px;
+  color: #101315;
+  background: #9df2c6;
+}
+
+.room-row-body {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.room-row strong,
+.room-row small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.room-row-count {
+  display: grid;
+  min-width: 28px;
+  min-height: 28px;
+  place-items: center;
+  border-radius: 999px;
+  color: #101315;
+  background: #9df2c6;
+  font-size: 0.8rem;
+  font-weight: 950;
+}
+
+.action-with-icon {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .eyebrow {
   color: #9df2c6;
   font-size: 0.73rem;
@@ -264,7 +370,7 @@ h2 {
 
 .room-shell {
   display: grid;
-  grid-template-columns: 72px 240px minmax(0, 1fr);
+  grid-template-columns: 240px minmax(0, 1fr);
   width: 100vw;
   min-width: 900px;
   height: 100vh;
