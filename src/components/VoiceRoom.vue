@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue';
-import { Headphones, MonitorUp, Mic, MicOff, PhoneOff, Settings, VolumeX, X } from 'lucide-vue-next';
+import { Headphones, MonitorUp, Mic, MicOff, PhoneOff, Settings, Volume2, VolumeX, X } from 'lucide-vue-next';
 
 type SignalType =
   | 'join-room'
@@ -51,6 +51,7 @@ const users = ref<string[]>([]);
 const status = ref('Connecting to signaling server...');
 const error = ref('');
 const micStarted = ref(false);
+const micStarting = ref(false);
 const muted = ref(false);
 const deafened = ref(false);
 const mutedBeforeDeafen = ref<boolean | null>(null);
@@ -70,6 +71,9 @@ const echoCancellation = ref(true);
 const autoGainControl = ref(true);
 const peerStates = reactive<Record<string, string>>({});
 const userNames = reactive<Record<string, string>>({});
+const memberVolumes = reactive<Record<string, number>>({});
+const screenVolumes = reactive<Record<string, number>>({});
+const speakingUsers = reactive<Record<string, boolean>>({});
 
 let socket: WebSocket | null = null;
 let rawLocalStream: MediaStream | null = null;
@@ -82,6 +86,7 @@ let heartbeatTimer: number | undefined;
 let intentionallyClosed = false;
 const peers = new Map<string, RTCPeerConnection>();
 const queuedCandidates = new Map<string, RTCIceCandidateInit[]>();
+const remoteAnalyzers = new Map<string, { context: AudioContext; timer: number }>();
 
 const otherUsers = computed(() => users.value.filter((userId) => userId !== currentUserId.value));
 const roomTag = computed(() => props.roomId.slice(0, 2).toUpperCase());
@@ -95,6 +100,7 @@ const voiceState = computed(() => {
 
 onMounted(() => {
   connect();
+  void startMicrophone();
   void loadDevices();
   navigator.mediaDevices?.addEventListener('devicechange', loadDevices);
 });
@@ -109,7 +115,7 @@ function connect() {
   socket.addEventListener('open', () => {
     wsOpen.value = true;
     error.value = '';
-    status.value = 'Joined room. Start your microphone when ready.';
+    status.value = micStarted.value ? 'Microphone is on.' : 'Joined room. Microphone is opening...';
     startHeartbeat();
     send({
       type: 'join-room',
@@ -172,9 +178,16 @@ function clearHeartbeat() {
 }
 
 async function startMicrophone() {
+  if (micStarted.value || micStarting.value) {
+    return;
+  }
+  micStarting.value = true;
   try {
     error.value = '';
     await openMicrophone();
+    if (localStream) {
+      startSpeakingDetection(currentUserId.value, localStream);
+    }
     muted.value = false;
     micStarted.value = true;
     status.value = 'Microphone is on.';
@@ -184,6 +197,8 @@ async function startMicrophone() {
     }
   } catch (err) {
     error.value = err instanceof Error ? err.message : 'Microphone permission failed.';
+  } finally {
+    micStarting.value = false;
   }
 }
 
@@ -215,6 +230,9 @@ async function restartMicrophone() {
   const wasMuted = muted.value;
   stopLocalAudio();
   await openMicrophone();
+  if (localStream) {
+    startSpeakingDetection(currentUserId.value, localStream);
+  }
   muted.value = wasMuted;
   setLocalTracksEnabled(!wasMuted);
 
@@ -259,18 +277,27 @@ function updateMicGain() {
 }
 
 function updateRemoteAudioSettings() {
-  const volume = deafened.value ? 0 : outputVolume.value / 100;
   remoteAudio.value?.querySelectorAll('audio').forEach((element) => {
     const audio = element as HTMLAudioElement & {
       setSinkId?: (sinkId: string) => Promise<void>;
     };
-    audio.volume = volume;
+    audio.volume = remoteElementVolume(audio);
     if (selectedOutputId.value && audio.setSinkId) {
       void audio.setSinkId(selectedOutputId.value).catch(() => {
         error.value = 'Selected output device is not available.';
       });
     }
   });
+}
+
+function remoteElementVolume(audio: HTMLAudioElement) {
+  if (deafened.value) {
+    return 0;
+  }
+  const userId = audio.dataset.userId ?? '';
+  const source = audio.dataset.source;
+  const sourceVolume = source === 'screen' ? (screenVolumes[userId] ?? 100) : (memberVolumes[userId] ?? 100);
+  return (outputVolume.value / 100) * (sourceVolume / 100);
 }
 
 function toggleMute() {
@@ -316,7 +343,12 @@ async function handleSignal(message: SignalMessage) {
     case 'room-users': {
       const payload = message.payload as RoomUsersPayload;
       if (message.userId) {
+        const previousUserId = currentUserId.value;
         currentUserId.value = message.userId;
+        if (previousUserId !== currentUserId.value && localStream) {
+          stopSpeakingDetection(previousUserId);
+          startSpeakingDetection(currentUserId.value, localStream);
+        }
       }
       userNames[currentUserId.value] = payload.self?.displayName || props.displayName;
       const existingUsers = (payload.users ?? []).map(registerUser);
@@ -485,9 +517,34 @@ function attachRemoteAudio(userId: string, stream: MediaStream, source: 'mic' | 
   audio.dataset.userId = userId;
   audio.dataset.source = source;
   audio.autoplay = true;
-  audio.volume = outputVolume.value / 100;
+  audio.volume = remoteElementVolume(audio);
   audio.srcObject = stream;
   host.appendChild(audio);
+  if (source === 'mic') {
+    startSpeakingDetection(userId, stream);
+  }
+  stream.getTracks().forEach((track) => {
+    track.addEventListener('ended', () => {
+      audio.remove();
+      if (source === 'mic') {
+        stopSpeakingDetection(userId);
+      }
+    });
+  });
+  updateRemoteAudioSettings();
+}
+
+function setMemberVolume(userId: string, value: number) {
+  memberVolumes[userId] = value;
+  updateRemoteAudioSettings();
+}
+
+function setMemberVolumeFromEvent(userId: string, event: Event) {
+  setMemberVolume(userId, Number((event.target as HTMLInputElement).value));
+}
+
+function setScreenVolume(userId: string, value: number) {
+  screenVolumes[userId] = value;
   updateRemoteAudioSettings();
 }
 
@@ -528,11 +585,22 @@ async function stopScreenShare() {
   sharingScreen.value = false;
   stoppedStream?.getTracks().forEach((track) => track.stop());
 
-  for (const peer of peers.values()) {
+  for (const [userId, peer] of peers) {
     for (const sender of peer.getSenders()) {
       if (sender.track && stoppedTrackIds.has(sender.track.id)) {
-        await sender.replaceTrack(null);
+        peer.removeTrack(sender);
       }
+    }
+    if (peer.signalingState === 'stable') {
+      const offer = await peer.createOffer();
+      await peer.setLocalDescription(offer);
+      send({
+        type: 'offer',
+        roomId: props.roomId,
+        userId: currentUserId.value,
+        targetUserId: userId,
+        payload: offer,
+      });
     }
   }
 }
@@ -556,6 +624,21 @@ function attachRemoteScreen(userId: string, stream: MediaStream) {
   const label = document.createElement('strong');
   label.textContent = `${displayName(userId)} is sharing`;
 
+  const controls = document.createElement('label');
+  controls.className = 'screen-volume-control';
+  controls.textContent = 'Share audio';
+  const volumeIcon = document.createElement('span');
+  volumeIcon.textContent = '';
+  const volume = document.createElement('input');
+  volume.type = 'range';
+  volume.min = '0';
+  volume.max = '100';
+  volume.value = String(screenVolumes[userId] ?? 100);
+  volume.addEventListener('input', () => {
+    setScreenVolume(userId, Number(volume.value));
+  });
+  controls.append(volumeIcon, volume);
+
   const video = document.createElement('video');
   video.dataset.userId = userId;
   video.autoplay = true;
@@ -563,12 +646,24 @@ function attachRemoteScreen(userId: string, stream: MediaStream) {
   video.muted = true;
   video.srcObject = stream;
 
-  wrap.append(label, video);
+  wrap.append(label, controls, video);
   host.appendChild(wrap);
 
-  stream.getVideoTracks()[0]?.addEventListener('ended', () => {
+  const removeTile = () => {
     wrap.remove();
+    remoteAudio.value?.querySelectorAll(`[data-user-id="${userId}"][data-source="screen"]`).forEach((element) => element.remove());
+  };
+  stream.getVideoTracks()[0]?.addEventListener('ended', removeTile);
+  stream.addEventListener('removetrack', () => {
+    if (!stream.getVideoTracks().some((track) => track.readyState === 'live')) {
+      removeTile();
+    }
   });
+  window.setTimeout(() => {
+    if (!stream.getVideoTracks().some((track) => track.readyState === 'live')) {
+      removeTile();
+    }
+  }, 0);
 }
 
 function closePeer(userId: string) {
@@ -576,6 +671,10 @@ function closePeer(userId: string) {
   peers.delete(userId);
   queuedCandidates.delete(userId);
   delete peerStates[userId];
+  delete memberVolumes[userId];
+  delete screenVolumes[userId];
+  delete speakingUsers[userId];
+  stopSpeakingDetection(userId);
   remoteAudio.value?.querySelectorAll(`[data-user-id="${userId}"]`).forEach((element) => element.remove());
   screenShareHost.value?.querySelectorAll(`[data-user-id="${userId}"]`).forEach((element) => element.remove());
 }
@@ -596,6 +695,7 @@ function cleanup() {
 }
 
 function stopLocalAudio() {
+  stopSpeakingDetection(currentUserId.value);
   rawLocalStream?.getTracks().forEach((track) => track.stop());
   localStream?.getTracks().forEach((track) => track.stop());
   rawLocalStream = null;
@@ -603,6 +703,44 @@ function stopLocalAudio() {
   micGainNode = null;
   void audioContext?.close();
   audioContext = null;
+}
+
+function startSpeakingDetection(userId: string, stream: MediaStream) {
+  stopSpeakingDetection(userId);
+  const track = stream.getAudioTracks()[0];
+  if (!track) {
+    return;
+  }
+
+  const context = new AudioContext();
+  const source = context.createMediaStreamSource(new MediaStream([track]));
+  const analyser = context.createAnalyser();
+  const samples = new Uint8Array(analyser.fftSize);
+  source.connect(analyser);
+
+  const timer = window.setInterval(() => {
+    analyser.getByteTimeDomainData(samples);
+    let total = 0;
+    for (const sample of samples) {
+      const centered = sample - 128;
+      total += centered * centered;
+    }
+    speakingUsers[userId] = Math.sqrt(total / samples.length) > 8;
+  }, 120);
+
+  remoteAnalyzers.set(userId, { context, timer });
+  track.addEventListener('ended', () => stopSpeakingDetection(userId), { once: true });
+}
+
+function stopSpeakingDetection(userId: string) {
+  const analyzer = remoteAnalyzers.get(userId);
+  if (!analyzer) {
+    return;
+  }
+  window.clearInterval(analyzer.timer);
+  void analyzer.context.close();
+  remoteAnalyzers.delete(userId);
+  speakingUsers[userId] = false;
 }
 
 function setLocalTracksEnabled(enabled: boolean) {
@@ -677,8 +815,9 @@ function initials(userId: string) {
             type="button"
             class="icon-button"
             :class="{ active: micStarted && !muted, danger: muted }"
-            :data-tooltip="micStarted ? (muted ? 'Unmute mic' : 'Mute mic') : 'Start mic'"
-            :title="micStarted ? (muted ? 'Unmute microphone' : 'Mute microphone') : 'Start microphone'"
+            :data-tooltip="micStarting ? 'Opening mic' : micStarted ? (muted ? 'Unmute mic' : 'Mute mic') : 'Start mic'"
+            :title="micStarting ? 'Opening microphone' : micStarted ? (muted ? 'Unmute microphone' : 'Mute microphone') : 'Start microphone'"
+            :disabled="micStarting"
             @click="micStarted ? toggleMute() : startMicrophone()"
           >
             <MicOff v-if="muted" :size="20" />
@@ -761,15 +900,25 @@ function initials(userId: string) {
     <aside class="member-sidebar">
       <div class="panel-heading">
         <h2>Members</h2>
-        <span>{{ users.length }}/5</span>
+        <span>{{ users.length }}</span>
       </div>
       <ul class="user-list">
-        <li v-for="userId in users" :key="userId">
+        <li v-for="userId in users" :key="userId" :class="{ speaking: speakingUsers[userId] }">
           <span class="avatar">{{ initials(userId) }}</span>
-          <div>
+          <div class="member-info">
             <strong>{{ displayName(userId) }}</strong>
             <small>{{ userId === currentUserId ? (deafened ? 'deafened' : muted ? 'muted' : 'local') : peerStates[userId] ?? 'waiting' }}</small>
           </div>
+          <label v-if="userId !== currentUserId" class="member-volume" :title="`${displayName(userId)} volume`">
+            <Volume2 :size="15" />
+            <input
+              type="range"
+              min="0"
+              max="100"
+              :value="memberVolumes[userId] ?? 100"
+              @input="setMemberVolumeFromEvent(userId, $event)"
+            />
+          </label>
         </li>
       </ul>
     </aside>

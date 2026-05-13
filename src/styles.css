@@ -13,7 +13,7 @@
 }
 
 body {
-  min-width: 320px;
+  min-width: 900px;
   min-height: 100vh;
   margin: 0;
   overflow: hidden;
@@ -266,6 +266,7 @@ h2 {
   display: grid;
   grid-template-columns: 72px 220px minmax(0, 1fr) 230px;
   width: 100vw;
+  min-width: 900px;
   height: 100vh;
   min-height: 0;
   background: #151719;
@@ -608,7 +609,18 @@ h2 {
   min-height: 50px;
   border-radius: 8px;
   padding: 8px;
+  border: 1px solid transparent;
   background: #252a2f;
+  transition:
+    border-color 140ms ease,
+    background 140ms ease,
+    box-shadow 140ms ease;
+}
+
+.user-list li.speaking {
+  border-color: #9df2c6;
+  background: #24342d;
+  box-shadow: 0 0 0 3px rgba(157, 242, 198, 0.12);
 }
 
 .user-list strong {
@@ -616,6 +628,33 @@ h2 {
   color: #f4f7f5;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.member-info {
+  flex: 1 1 auto;
+}
+
+.member-volume,
+.screen-volume-control {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #aeb9b4;
+  font-size: 0.72rem;
+}
+
+.member-volume {
+  width: 76px;
+  flex: 0 0 76px;
+}
+
+.member-volume input,
+.screen-volume-control input {
+  min-width: 0;
+}
+
+.screen-volume-control {
+  min-height: 28px;
 }
 
 .avatar {
@@ -686,16 +725,6 @@ h2 {
   display: none;
 }
 
-@media (max-width: 900px) {
-  .room-shell {
-    grid-template-columns: 64px 190px minmax(0, 1fr);
-  }
-
-  .member-sidebar {
-    display: none;
-  }
-}
-
 @media (max-width: 680px) {
   body {
     overflow: auto;
@@ -716,17 +745,6 @@ h2 {
 
   .home-copy h1 {
     font-size: 2rem;
-  }
-
-  .room-shell {
-    grid-template-columns: 1fr;
-    height: auto;
-    min-height: 100vh;
-  }
-
-  .server-rail,
-  .channel-sidebar {
-    display: none;
   }
 
   .voice-stage {
