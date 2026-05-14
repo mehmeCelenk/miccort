@@ -920,14 +920,36 @@ h2 {
   right: 0;
   z-index: 10;
   display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
   width: min(360px, 100vw);
   height: 100vh;
   align-content: start;
   gap: 18px;
   border-left: 1px solid #30363b;
   padding: 18px;
+  overflow-y: auto;
+  scrollbar-color: #4d5a54 #151719;
+  scrollbar-width: thin;
   background: #1c2024;
   box-shadow: -24px 0 60px rgba(0, 0, 0, 0.36);
+}
+
+.settings-drawer::-webkit-scrollbar {
+  width: 10px;
+}
+
+.settings-drawer::-webkit-scrollbar-track {
+  background: #151719;
+}
+
+.settings-drawer::-webkit-scrollbar-thumb {
+  border: 2px solid #151719;
+  border-radius: 999px;
+  background: #4d5a54;
+}
+
+.settings-drawer::-webkit-scrollbar-thumb:hover {
+  background: #6f8078;
 }
 
 .drawer-header {
