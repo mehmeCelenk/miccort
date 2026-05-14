@@ -73,6 +73,7 @@ const selectedOutputId = ref('');
 const inputGain = ref(100);
 const inputSensitivity = ref(0);
 const outputVolume = ref(100);
+const selectedScreenFps = ref(30);
 const noiseSuppression = ref(true);
 const echoCancellation = ref(true);
 const autoGainControl = ref(true);
@@ -103,12 +104,6 @@ const queuedCandidates = new Map<string, RTCIceCandidateInit[]>();
 const remoteAnalyzers = new Map<string, { context: AudioContext; timer: number }>();
 const screenVideoElements = new Map<string, HTMLVideoElement>();
 const senderSources = new WeakMap<RTCRtpSender, SenderSource>();
-const screenShareVideoConstraints: MediaTrackConstraints = {
-  frameRate: { ideal: 15, max: 20 },
-  width: { ideal: 1280, max: 1920 },
-  height: { ideal: 720, max: 1080 },
-};
-
 const otherUsers = computed(() => users.value.filter((userId) => userId !== currentUserId.value));
 const connectionLabel = computed(() => (wsOpen.value ? 'Connected' : 'Offline'));
 const voiceState = computed(() => {
@@ -371,6 +366,37 @@ function remoteElementVolume(audio: HTMLAudioElement) {
   return (outputVolume.value / 100) * (sourceVolume / 100);
 }
 
+function screenShareVideoConstraints(): MediaTrackConstraints {
+  const fps = normalizedScreenFps();
+  return {
+    frameRate: { ideal: fps, max: fps },
+    width: { ideal: 1280, max: 1920 },
+    height: { ideal: 720, max: 1080 },
+  };
+}
+
+function normalizedScreenFps() {
+  return Math.min(60, Math.max(30, Number(selectedScreenFps.value) || 30));
+}
+
+async function applyScreenFpsSettings() {
+  selectedScreenFps.value = normalizedScreenFps();
+  if (!screenStream) {
+    return;
+  }
+
+  const constraints = screenShareVideoConstraints();
+  await Promise.all(screenStream.getVideoTracks().map((track) => track.applyConstraints(constraints).catch(() => undefined)));
+
+  for (const peer of peers.values()) {
+    for (const sender of peer.getSenders()) {
+      if (senderSources.get(sender) === 'screen' && sender.track?.kind === 'video') {
+        configureSender(sender, sender.track, 'screen');
+      }
+    }
+  }
+}
+
 function toggleMute() {
   if (!localStream) {
     return;
@@ -494,18 +520,30 @@ async function ensurePeer(userId: string, makeOffer: boolean) {
   }
 
   if (makeOffer) {
-    const offer = await peer.createOffer();
-    await peer.setLocalDescription(offer);
-    send({
-      type: 'offer',
-      roomId: props.roomId,
-      userId: currentUserId.value,
-      targetUserId: userId,
-      payload: offer,
-    });
+    await sendOffer(userId, peer);
   }
 
   return peer;
+}
+
+async function sendOffer(userId: string, peer: RTCPeerConnection) {
+  if (peer.signalingState !== 'stable') {
+    return;
+  }
+
+  const offer = await peer.createOffer();
+  if (peer.signalingState !== 'stable') {
+    return;
+  }
+
+  await peer.setLocalDescription(offer);
+  send({
+    type: 'offer',
+    roomId: props.roomId,
+    userId: currentUserId.value,
+    targetUserId: userId,
+    payload: offer,
+  });
 }
 
 function createPeer(userId: string) {
@@ -545,6 +583,12 @@ function createPeer(userId: string) {
 
 async function receiveOffer(userId: string, offer: RTCSessionDescriptionInit) {
   const peer = await ensurePeer(userId, false);
+  if (peer.signalingState === 'have-local-offer') {
+    await peer.setLocalDescription({ type: 'rollback' });
+  } else if (peer.signalingState !== 'stable') {
+    return;
+  }
+
   await peer.setRemoteDescription(offer);
   await flushQueuedCandidates(userId, peer);
 
@@ -659,14 +703,15 @@ async function toggleScreenShare() {
 async function startScreenShare() {
   try {
     error.value = '';
+    const videoConstraints = screenShareVideoConstraints();
     screenStream = await navigator.mediaDevices.getDisplayMedia({
-      video: screenShareVideoConstraints,
+      video: videoConstraints,
       audio: true,
     });
     sharingScreen.value = true;
 
     const [track] = screenStream.getVideoTracks();
-    await track?.applyConstraints(screenShareVideoConstraints).catch(() => undefined);
+    await track?.applyConstraints(videoConstraints).catch(() => undefined);
     track.addEventListener('ended', () => {
       void stopScreenShare();
     });
@@ -695,7 +740,7 @@ function configureSender(sender: RTCRtpSender, track: MediaStreamTrack, source: 
     parameters.encodings[0] = {
       ...parameters.encodings[0],
       maxBitrate: 1_500_000,
-      maxFramerate: 20,
+      maxFramerate: normalizedScreenFps(),
     };
   } else if (track.kind === 'audio' && source === 'screen') {
     parameters.encodings[0] = {
@@ -722,15 +767,7 @@ async function stopScreenShare() {
       }
     }
     if (peer.signalingState === 'stable') {
-      const offer = await peer.createOffer();
-      await peer.setLocalDescription(offer);
-      send({
-        type: 'offer',
-        roomId: props.roomId,
-        userId: currentUserId.value,
-        targetUserId: userId,
-        payload: offer,
-      });
+      await sendOffer(userId, peer);
     }
   }
 }
@@ -1165,6 +1202,12 @@ function initials(userId: string) {
           Output volume
           <input v-model.number="outputVolume" type="range" min="0" max="100" @input="updateRemoteAudioSettings" />
           <small>{{ deafened ? 'Muted' : `${outputVolume}%` }}</small>
+        </label>
+
+        <label>
+          Screen FPS
+          <input v-model.number="selectedScreenFps" type="range" min="30" max="60" step="1" @input="applyScreenFpsSettings" />
+          <small>{{ selectedScreenFps }} FPS</small>
         </label>
       </div>
 
