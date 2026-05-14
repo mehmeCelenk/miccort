@@ -42,6 +42,7 @@ interface RemoteScreenShare {
 }
 
 type SenderSource = 'mic' | 'screen';
+type ShortcutAction = 'mute' | 'deafen';
 
 const props = defineProps<{
   roomId: string;
@@ -77,6 +78,9 @@ const selectedScreenFps = ref(30);
 const noiseSuppression = ref(true);
 const echoCancellation = ref(true);
 const autoGainControl = ref(true);
+const muteShortcut = ref(readStoredValue('mikcort:shortcut:mute', ''));
+const deafenShortcut = ref(readStoredValue('mikcort:shortcut:deafen', ''));
+const capturingShortcut = ref<ShortcutAction | null>(null);
 const peerStates = reactive<Record<string, string>>({});
 const userNames = reactive<Record<string, string>>({});
 const memberVolumes = reactive<Record<string, number>>({});
@@ -92,6 +96,7 @@ let rawLocalStream: MediaStream | null = null;
 let localStream: MediaStream | null = null;
 let screenStream: MediaStream | null = null;
 let audioContext: AudioContext | null = null;
+let feedbackAudioContext: AudioContext | null = null;
 let micGainNode: GainNode | null = null;
 let micSensitivityNode: GainNode | null = null;
 let micSensitivityAnalyser: AnalyserNode | null = null;
@@ -104,6 +109,8 @@ const queuedCandidates = new Map<string, RTCIceCandidateInit[]>();
 const remoteAnalyzers = new Map<string, { context: AudioContext; timer: number }>();
 const screenVideoElements = new Map<string, HTMLVideoElement>();
 const senderSources = new WeakMap<RTCRtpSender, SenderSource>();
+const makingOffers = new Set<string>();
+const speakingUntil = new Map<string, number>();
 const otherUsers = computed(() => users.value.filter((userId) => userId !== currentUserId.value));
 const connectionLabel = computed(() => (wsOpen.value ? 'Connected' : 'Offline'));
 const voiceState = computed(() => {
@@ -401,17 +408,24 @@ function toggleMute() {
   if (!localStream) {
     return;
   }
+  const wasMuted = muted.value;
+  const wasDeafened = deafened.value;
   if (muted.value && deafened.value) {
     deafened.value = false;
     mutedBeforeDeafen.value = null;
   }
   muted.value = !muted.value;
   setLocalTracksEnabled(!muted.value);
+  if (muted.value) {
+    speakingUsers[currentUserId.value] = false;
+  }
   updateRemoteAudioSettings();
+  playVoiceFeedback(!wasMuted && muted.value ? 'mute' : 'unmute', wasDeafened);
 }
 
 function toggleDeafen() {
   const nextDeafened = !deafened.value;
+  const wasDeafened = deafened.value;
   deafened.value = nextDeafened;
   if (nextDeafened) {
     mutedBeforeDeafen.value = muted.value;
@@ -428,6 +442,45 @@ function toggleDeafen() {
     }
   }
   updateRemoteAudioSettings();
+  playVoiceFeedback(nextDeafened ? 'deafen' : 'undeafen', wasDeafened);
+}
+
+function playVoiceFeedback(type: 'mute' | 'unmute' | 'deafen' | 'undeafen', wasDeafened = false) {
+  if ((deafened.value && type !== 'deafen') || (wasDeafened && type !== 'undeafen') || outputVolume.value <= 0) {
+    return;
+  }
+
+  feedbackAudioContext ??= new AudioContext();
+  const context = feedbackAudioContext;
+  void context.resume();
+  const now = context.currentTime;
+  const master = context.createGain();
+  master.gain.setValueAtTime(0.0001, now);
+  master.gain.exponentialRampToValueAtTime(0.18 * (outputVolume.value / 100), now + 0.012);
+  master.gain.exponentialRampToValueAtTime(0.0001, now + 0.28);
+  master.connect(context.destination);
+
+  const tones = {
+    mute: [520, 330],
+    unmute: [330, 560],
+    deafen: [420, 250],
+    undeafen: [250, 420],
+  }[type];
+
+  tones.forEach((frequency, index) => {
+    const oscillator = context.createOscillator();
+    const gain = context.createGain();
+    const start = now + index * 0.09;
+    oscillator.type = 'sine';
+    oscillator.frequency.setValueAtTime(frequency, start);
+    gain.gain.setValueAtTime(0.0001, start);
+    gain.gain.exponentialRampToValueAtTime(1, start + 0.01);
+    gain.gain.exponentialRampToValueAtTime(0.0001, start + 0.12);
+    oscillator.connect(gain);
+    gain.connect(master);
+    oscillator.start(start);
+    oscillator.stop(start + 0.13);
+  });
 }
 
 function leave() {
@@ -450,6 +503,11 @@ async function handleSignal(message: SignalMessage) {
       userNames[currentUserId.value] = payload.self?.displayName || props.displayName;
       const existingUsers = (payload.users ?? []).map(registerUser);
       users.value = unique([currentUserId.value, ...existingUsers]);
+      if (localStream) {
+        for (const userId of otherUsers.value) {
+          await ensurePeer(userId, true);
+        }
+      }
       break;
     }
     case 'user-joined':
@@ -475,8 +533,8 @@ async function handleSignal(message: SignalMessage) {
     case 'answer':
       if (message.userId) {
         const peer = peers.get(message.userId);
-        if (peer) {
-          await peer.setRemoteDescription(message.payload as RTCSessionDescriptionInit);
+        if (peer && peer.signalingState === 'have-local-offer') {
+          await peer.setRemoteDescription(message.payload as RTCSessionDescriptionInit).catch(() => undefined);
           await flushQueuedCandidates(message.userId, peer);
         }
       }
@@ -527,23 +585,30 @@ async function ensurePeer(userId: string, makeOffer: boolean) {
 }
 
 async function sendOffer(userId: string, peer: RTCPeerConnection) {
-  if (peer.signalingState !== 'stable') {
+  if (makingOffers.has(userId) || peer.signalingState !== 'stable') {
     return;
   }
 
-  const offer = await peer.createOffer();
-  if (peer.signalingState !== 'stable') {
-    return;
-  }
+  makingOffers.add(userId);
+  try {
+    const offer = await peer.createOffer();
+    if (peer.signalingState !== 'stable') {
+      return;
+    }
 
-  await peer.setLocalDescription(offer);
-  send({
-    type: 'offer',
-    roomId: props.roomId,
-    userId: currentUserId.value,
-    targetUserId: userId,
-    payload: offer,
-  });
+    await peer.setLocalDescription(offer);
+    send({
+      type: 'offer',
+      roomId: props.roomId,
+      userId: currentUserId.value,
+      targetUserId: userId,
+      payload: offer,
+    });
+  } catch {
+    return;
+  } finally {
+    makingOffers.delete(userId);
+  }
 }
 
 function createPeer(userId: string) {
@@ -584,16 +649,24 @@ function createPeer(userId: string) {
 async function receiveOffer(userId: string, offer: RTCSessionDescriptionInit) {
   const peer = await ensurePeer(userId, false);
   if (peer.signalingState === 'have-local-offer') {
-    await peer.setLocalDescription({ type: 'rollback' });
+    await peer.setLocalDescription({ type: 'rollback' }).catch(() => undefined);
   } else if (peer.signalingState !== 'stable') {
     return;
   }
 
-  await peer.setRemoteDescription(offer);
+  await peer.setRemoteDescription(offer).catch(() => undefined);
+  const remoteOfferState = peer.signalingState as string;
+  if (remoteOfferState !== 'have-remote-offer') {
+    return;
+  }
   await flushQueuedCandidates(userId, peer);
 
   const answer = await peer.createAnswer();
-  await peer.setLocalDescription(answer);
+  await peer.setLocalDescription(answer).catch(() => undefined);
+  const answeredState = peer.signalingState as string;
+  if (answeredState !== 'stable') {
+    return;
+  }
   send({
     type: 'answer',
     roomId: props.roomId,
@@ -686,10 +759,95 @@ function closePopovers() {
 }
 
 function handleKeydown(event: KeyboardEvent) {
+  if (capturingShortcut.value) {
+    event.preventDefault();
+    const shortcut = keyboardShortcut(event);
+    if (shortcut) {
+      setShortcut(capturingShortcut.value, shortcut);
+    }
+    return;
+  }
+
   if (event.key === 'Escape') {
     fullscreenScreenUser.value = null;
     closePopovers();
+    return;
   }
+
+  if (event.repeat || isTypingTarget(event.target)) {
+    return;
+  }
+
+  const shortcut = keyboardShortcut(event);
+  if (muteShortcut.value && shortcut === muteShortcut.value) {
+    event.preventDefault();
+    toggleMute();
+  } else if (deafenShortcut.value && shortcut === deafenShortcut.value) {
+    event.preventDefault();
+    toggleDeafen();
+  }
+}
+
+function startShortcutCapture(action: ShortcutAction) {
+  capturingShortcut.value = action;
+}
+
+function setShortcut(action: ShortcutAction, shortcut: string) {
+  if (action === 'mute') {
+    muteShortcut.value = shortcut;
+    localStorage.setItem('mikcort:shortcut:mute', shortcut);
+  } else {
+    deafenShortcut.value = shortcut;
+    localStorage.setItem('mikcort:shortcut:deafen', shortcut);
+  }
+  capturingShortcut.value = null;
+}
+
+function clearShortcut(action: ShortcutAction) {
+  if (action === 'mute') {
+    muteShortcut.value = '';
+    localStorage.removeItem('mikcort:shortcut:mute');
+  } else {
+    deafenShortcut.value = '';
+    localStorage.removeItem('mikcort:shortcut:deafen');
+  }
+}
+
+function keyboardShortcut(event: KeyboardEvent) {
+  if (event.key === 'Escape') {
+    capturingShortcut.value = null;
+    return '';
+  }
+  const parts: string[] = [];
+  if (event.ctrlKey) parts.push('Control');
+  if (event.altKey) parts.push('Alt');
+  if (event.shiftKey) parts.push('Shift');
+  if (event.metaKey) parts.push('Meta');
+  const key = event.code || event.key;
+  if (!['ControlLeft', 'ControlRight', 'AltLeft', 'AltRight', 'ShiftLeft', 'ShiftRight', 'MetaLeft', 'MetaRight'].includes(key)) {
+    parts.push(key);
+  }
+  return parts.length ? parts.join('+') : '';
+}
+
+function formatShortcut(shortcut: string) {
+  return shortcut
+    .replaceAll('Control', 'Ctrl')
+    .replaceAll('Key', '')
+    .replaceAll('Digit', '')
+    .replaceAll('Arrow', '');
+}
+
+function isTypingTarget(target: EventTarget | null) {
+  const element = target as HTMLElement | null;
+  if (!element) {
+    return false;
+  }
+  return ['INPUT', 'TEXTAREA', 'SELECT'].includes(element.tagName) || element.isContentEditable;
+}
+
+function readStoredValue(key: string, fallback: string) {
+  return localStorage.getItem(key) || fallback;
 }
 
 async function toggleScreenShare() {
@@ -832,6 +990,7 @@ function closePeer(userId: string) {
   peers.get(userId)?.close();
   peers.delete(userId);
   queuedCandidates.delete(userId);
+  makingOffers.delete(userId);
   delete peerStates[userId];
   delete memberVolumes[userId];
   delete screenVolumes[userId];
@@ -869,6 +1028,8 @@ function stopLocalAudio() {
   micSensitivityAnalyser = null;
   void audioContext?.close();
   audioContext = null;
+  void feedbackAudioContext?.close();
+  feedbackAudioContext = null;
 }
 
 function startSpeakingDetection(userId: string, stream: MediaStream) {
@@ -879,20 +1040,36 @@ function startSpeakingDetection(userId: string, stream: MediaStream) {
   }
 
   const context = new AudioContext();
+  void context.resume();
   const source = context.createMediaStreamSource(new MediaStream([track]));
   const analyser = context.createAnalyser();
+  analyser.fftSize = 1024;
+  analyser.smoothingTimeConstant = 0.35;
   const samples = new Uint8Array(analyser.fftSize);
   source.connect(analyser);
+  let noiseFloor = 1.8;
 
   const timer = window.setInterval(() => {
+    if (track.readyState !== 'live' || track.muted || (userId === currentUserId.value && muted.value)) {
+      speakingUsers[userId] = false;
+      return;
+    }
+
     analyser.getByteTimeDomainData(samples);
     let total = 0;
     for (const sample of samples) {
       const centered = sample - 128;
       total += centered * centered;
     }
-    speakingUsers[userId] = Math.sqrt(total / samples.length) > 8;
-  }, 120);
+    const rms = Math.sqrt(total / samples.length);
+    noiseFloor = Math.min(12, noiseFloor * 0.96 + rms * 0.04);
+    const threshold = Math.max(3.2, noiseFloor + 1.6);
+    const now = performance.now();
+    if (rms > threshold) {
+      speakingUntil.set(userId, now + 520);
+    }
+    speakingUsers[userId] = (speakingUntil.get(userId) ?? 0) > now;
+  }, 70);
 
   remoteAnalyzers.set(userId, { context, timer });
   track.addEventListener('ended', () => stopSpeakingDetection(userId), { once: true });
@@ -906,6 +1083,7 @@ function stopSpeakingDetection(userId: string) {
   window.clearInterval(analyzer.timer);
   void analyzer.context.close();
   remoteAnalyzers.delete(userId);
+  speakingUntil.delete(userId);
   speakingUsers[userId] = false;
 }
 
@@ -1070,10 +1248,11 @@ function initials(userId: string) {
 
     <main class="voice-stage">
       <header class="stage-header">
-        <div>
-          <p class="eyebrow">Voice channel</p>
+        <div class="stage-title">
           <h1>Lounge</h1>
-          <small class="stage-room-id">Room {{ roomId }}</small>
+          <span>Room {{ roomId }}</span>
+          <span>{{ users.length }} connected</span>
+          <span>{{ status }}</span>
         </div>
         <div class="connection-pill">
           <span :class="['dot', wsOpen ? 'online' : 'offline']"></span>
@@ -1082,21 +1261,6 @@ function initials(userId: string) {
       </header>
 
       <p v-if="error" class="error">{{ error }}</p>
-
-      <section class="voice-room-panel">
-        <div class="voice-room-copy">
-          <p>{{ status }}</p>
-          <strong>{{ users.length }} connected in Lounge</strong>
-        </div>
-
-        <div class="room-presence">
-          <div class="presence-row">
-            <span class="dot online"></span>
-            <span>{{ displayName(currentUserId) }}</span>
-            <small>{{ deafened ? 'deafened' : voiceState.toLowerCase() }}</small>
-          </div>
-        </div>
-      </section>
 
       <section v-if="remoteScreens.length" class="screen-share-grid" aria-label="Screen shares">
         <article
@@ -1209,6 +1373,44 @@ function initials(userId: string) {
           <input v-model.number="selectedScreenFps" type="range" min="30" max="60" step="1" @input="applyScreenFpsSettings" />
           <small>{{ selectedScreenFps }} FPS</small>
         </label>
+
+        <div class="shortcut-row">
+          <span>Mute shortcut</span>
+          <div class="shortcut-control">
+            <button type="button" class="shortcut-button" @click="startShortcutCapture('mute')">
+              {{ capturingShortcut === 'mute' ? 'Press keys...' : muteShortcut ? formatShortcut(muteShortcut) : 'Not set' }}
+            </button>
+            <button
+              v-if="muteShortcut"
+              type="button"
+              class="icon-button compact-button shortcut-clear"
+              data-tooltip="Clear shortcut"
+              title="Clear shortcut"
+              @click="clearShortcut('mute')"
+            >
+              <X :size="15" />
+            </button>
+          </div>
+        </div>
+
+        <div class="shortcut-row">
+          <span>Deafen shortcut</span>
+          <div class="shortcut-control">
+            <button type="button" class="shortcut-button" @click="startShortcutCapture('deafen')">
+              {{ capturingShortcut === 'deafen' ? 'Press keys...' : deafenShortcut ? formatShortcut(deafenShortcut) : 'Not set' }}
+            </button>
+            <button
+              v-if="deafenShortcut"
+              type="button"
+              class="icon-button compact-button shortcut-clear"
+              data-tooltip="Clear shortcut"
+              title="Clear shortcut"
+              @click="clearShortcut('deafen')"
+            >
+              <X :size="15" />
+            </button>
+          </div>
+        </div>
       </div>
 
       <div class="toggle-row drawer-toggles">

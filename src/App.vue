@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { Plus, RefreshCw, Users } from 'lucide-vue-next';
 import VoiceRoom from './components/VoiceRoom.vue';
 
@@ -9,8 +9,8 @@ interface RoomSummary {
 }
 
 const roomId = ref('');
-const serverUrl = ref('ws://localhost:8080/ws');
-const displayName = ref('');
+const serverUrl = ref(readStoredValue('mikcort:server-url', 'ws://localhost:8080/ws'));
+const displayName = ref(readStoredValue('mikcort:display-name', ''));
 const activeRoomId = ref('');
 const updateMessage = ref('');
 const updateTone = ref<'info' | 'success' | 'error'>('info');
@@ -41,6 +41,14 @@ onBeforeUnmount(() => {
   if (roomRefreshTimer) {
     window.clearInterval(roomRefreshTimer);
   }
+});
+
+watch(serverUrl, (value) => {
+  localStorage.setItem('mikcort:server-url', value.trim());
+});
+
+watch(displayName, (value) => {
+  localStorage.setItem('mikcort:display-name', value.trim());
 });
 
 function createRoom() {
@@ -115,6 +123,10 @@ function buildRoomsEndpoint(value: string) {
   } catch {
     return '';
   }
+}
+
+function readStoredValue(key: string, fallback: string) {
+  return localStorage.getItem(key) || fallback;
 }
 </script>
 

@@ -412,18 +412,17 @@ h2 {
 
 .voice-dock small,
 .user-list small,
-.panel-heading span,
-.voice-room-copy p {
+.panel-heading span {
   color: #aeb9b4;
 }
 
 .voice-stage {
   display: grid;
-  grid-template-rows: auto auto auto minmax(320px, 1fr);
+  grid-template-rows: auto auto minmax(0, 1fr);
   min-width: 0;
   min-height: 0;
-  gap: 14px;
-  padding: 18px;
+  gap: 10px;
+  padding: 12px;
   overflow: hidden;
   background:
     linear-gradient(180deg, rgba(42, 48, 53, 0.72), rgba(21, 23, 25, 0.92)),
@@ -451,6 +450,34 @@ h2 {
   font-weight: 800;
 }
 
+.stage-header {
+  min-height: 42px;
+}
+
+.stage-title {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  gap: 10px;
+}
+
+.stage-title h1 {
+  font-size: 1.05rem;
+}
+
+.stage-title span {
+  overflow: hidden;
+  color: #aeb9b4;
+  font-size: 0.8rem;
+  font-weight: 800;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.stage-title span:last-child {
+  min-width: 0;
+}
+
 .dot {
   width: 9px;
   height: 9px;
@@ -463,30 +490,12 @@ h2 {
   background: #58d48f;
 }
 
-.voice-room-panel {
-  display: grid;
-  align-content: start;
-  gap: 14px;
-  min-height: 0;
-  border-top: 1px solid #30363b;
-  padding-top: 18px;
-}
-
-.voice-room-copy {
-  display: grid;
-  gap: 6px;
-}
-
-.room-presence {
-  display: grid;
-  gap: 8px;
-}
-
 .screen-share-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
-  grid-auto-rows: minmax(280px, 1fr);
-  gap: 14px;
+  grid-template-columns: repeat(auto-fit, minmax(420px, 1fr));
+  grid-auto-rows: minmax(0, 1fr);
+  gap: 10px;
+  height: 100%;
   min-height: 0;
   align-content: stretch;
 }
@@ -503,14 +512,6 @@ h2 {
   border-radius: 8px;
   padding: 10px;
   background: #101315;
-}
-
-.stage-room-id {
-  display: block;
-  margin-top: 5px;
-  color: #aeb9b4;
-  font-size: 0.78rem;
-  font-weight: 800;
 }
 
 .screen-share-tile.fullscreen {
@@ -604,6 +605,36 @@ h2 {
 .settings-grid small {
   color: #aeb9b4;
   font-weight: 800;
+}
+
+.shortcut-row {
+  display: grid;
+  gap: 8px;
+  color: #aeb9b4;
+  font-size: 0.84rem;
+  font-weight: 750;
+}
+
+.shortcut-control {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 40px;
+  gap: 8px;
+}
+
+.shortcut-button {
+  min-height: 40px;
+  border: 1px solid #30363b;
+  color: #d8dfdc;
+  background: #252a2f;
+  font-size: 0.84rem;
+  text-align: left;
+}
+
+.shortcut-clear {
+  width: 40px;
+  color: #ffffff;
+  border-color: rgba(217, 79, 103, 0.45);
+  background: #d94f67;
 }
 
 .toggle-row {
