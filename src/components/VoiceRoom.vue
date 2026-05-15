@@ -111,6 +111,8 @@ const screenVideoElements = new Map<string, HTMLVideoElement>();
 const senderSources = new WeakMap<RTCRtpSender, SenderSource>();
 const makingOffers = new Set<string>();
 const speakingUntil = new Map<string, number>();
+const peerRecoveryTimers = new Map<string, number>();
+const peerHeartbeats = new Map<string, { channel: RTCDataChannel; timer?: number }>();
 const otherUsers = computed(() => users.value.filter((userId) => userId !== currentUserId.value));
 const connectionLabel = computed(() => (wsOpen.value ? 'Connected' : 'Offline'));
 const voiceState = computed(() => {
@@ -515,7 +517,7 @@ async function handleSignal(message: SignalMessage) {
         registerUser((message.payload as UserSummary | undefined) ?? message.userId);
         users.value = unique([...users.value, message.userId]);
         if (localStream) {
-          await ensurePeer(message.userId, true);
+          await ensurePeer(message.userId, false);
         }
       }
       break;
@@ -584,14 +586,14 @@ async function ensurePeer(userId: string, makeOffer: boolean) {
   return peer;
 }
 
-async function sendOffer(userId: string, peer: RTCPeerConnection) {
+async function sendOffer(userId: string, peer: RTCPeerConnection, options?: RTCOfferOptions) {
   if (makingOffers.has(userId) || peer.signalingState !== 'stable') {
     return;
   }
 
   makingOffers.add(userId);
   try {
-    const offer = await peer.createOffer();
+    const offer = await peer.createOffer(options);
     if (peer.signalingState !== 'stable') {
       return;
     }
@@ -616,6 +618,13 @@ function createPeer(userId: string) {
     iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
   });
 
+  setupPeerHeartbeat(userId, peer.createDataChannel('heartbeat', { ordered: false, maxRetransmits: 0 }));
+  peer.ondatachannel = (event) => {
+    if (event.channel.label === 'heartbeat') {
+      setupPeerHeartbeat(userId, event.channel);
+    }
+  };
+
   peerStates[userId] = 'new';
 
   peer.onicecandidate = (event) => {
@@ -630,9 +639,8 @@ function createPeer(userId: string) {
     }
   };
 
-  peer.onconnectionstatechange = () => {
-    peerStates[userId] = peer.connectionState;
-  };
+  peer.onconnectionstatechange = () => handlePeerConnectionState(userId, peer);
+  peer.oniceconnectionstatechange = () => handlePeerConnectionState(userId, peer);
 
   peer.ontrack = (event) => {
     if (event.track.kind === 'audio') {
@@ -644,6 +652,113 @@ function createPeer(userId: string) {
   };
 
   return peer;
+}
+
+function handlePeerConnectionState(userId: string, peer: RTCPeerConnection) {
+  const state = peer.connectionState === 'new' ? peer.iceConnectionState : peer.connectionState;
+  peerStates[userId] = state;
+
+  if (isPeerHealthy(peer)) {
+    clearPeerRecovery(userId);
+    if (status.value === 'Reconnecting voice...') {
+      status.value = 'Microphone is on.';
+    }
+    return;
+  }
+
+  if (state === 'disconnected' || state === 'failed') {
+    schedulePeerRecovery(userId, peer, state === 'failed' ? 0 : 2500);
+  }
+}
+
+function schedulePeerRecovery(userId: string, peer: RTCPeerConnection, delay: number) {
+  if (intentionallyClosed || peerRecoveryTimers.has(userId)) {
+    return;
+  }
+
+  status.value = 'Reconnecting voice...';
+  const timer = window.setTimeout(() => {
+    peerRecoveryTimers.delete(userId);
+    if (intentionallyClosed || peer.connectionState === 'closed') {
+      return;
+    }
+    if (isPeerHealthy(peer)) {
+      return;
+    }
+    void restartPeerIce(userId, peer);
+  }, delay);
+  peerRecoveryTimers.set(userId, timer);
+}
+
+async function restartPeerIce(userId: string, peer: RTCPeerConnection) {
+  if (socket?.readyState !== WebSocket.OPEN || peer.signalingState !== 'stable') {
+    schedulePeerRecovery(userId, peer, 3000);
+    return;
+  }
+
+  await sendOffer(userId, peer, { iceRestart: true });
+  if (!isPeerHealthy(peer)) {
+    schedulePeerRecovery(userId, peer, 5000);
+  }
+}
+
+function isPeerHealthy(peer: RTCPeerConnection) {
+  return peer.connectionState === 'connected' || peer.iceConnectionState === 'connected' || peer.iceConnectionState === 'completed';
+}
+
+function setupPeerHeartbeat(userId: string, channel: RTCDataChannel) {
+  const existing = peerHeartbeats.get(userId);
+  if (existing?.channel === channel) {
+    return;
+  }
+  clearPeerHeartbeat(userId);
+
+  peerHeartbeats.set(userId, { channel });
+  channel.addEventListener('open', () => startPeerHeartbeat(userId, channel));
+  channel.addEventListener('close', () => {
+    if (peerHeartbeats.get(userId)?.channel === channel) {
+      clearPeerHeartbeat(userId);
+    }
+  });
+
+  if (channel.readyState === 'open') {
+    startPeerHeartbeat(userId, channel);
+  }
+}
+
+function startPeerHeartbeat(userId: string, channel: RTCDataChannel) {
+  const heartbeat = peerHeartbeats.get(userId);
+  if (!heartbeat || heartbeat.channel !== channel || heartbeat.timer) {
+    return;
+  }
+
+  heartbeat.timer = window.setInterval(() => {
+    if (channel.readyState !== 'open') {
+      clearPeerHeartbeat(userId);
+      return;
+    }
+    channel.send('ping');
+  }, 10_000);
+}
+
+function clearPeerHeartbeat(userId: string) {
+  const heartbeat = peerHeartbeats.get(userId);
+  if (!heartbeat) {
+    return;
+  }
+  if (heartbeat.timer) {
+    window.clearInterval(heartbeat.timer);
+  }
+  peerHeartbeats.delete(userId);
+}
+
+function clearPeerRecovery(userId: string) {
+  const timer = peerRecoveryTimers.get(userId);
+  if (!timer) {
+    return;
+  }
+  window.clearTimeout(timer);
+  peerRecoveryTimers.delete(userId);
 }
 
 async function receiveOffer(userId: string, offer: RTCSessionDescriptionInit) {
@@ -987,6 +1102,8 @@ function toggleScreenFullscreen(userId: string) {
 }
 
 function closePeer(userId: string) {
+  clearPeerRecovery(userId);
+  clearPeerHeartbeat(userId);
   peers.get(userId)?.close();
   peers.delete(userId);
   queuedCandidates.delete(userId);
