@@ -121,7 +121,8 @@ git tag v0.2.0
 git push origin main v0.2.0
 ```
 
-The `Release desktop app` workflow builds the Windows app, signs updater artifacts, creates a GitHub Release, and uploads `latest.json`.
+The `Release desktop app` workflow builds the Windows app and a universal macOS desktop app, signs updater artifacts, creates a GitHub Release, and uploads `latest.json`.
+macOS builds are produced on GitHub's macOS runner; Apple code signing and notarization credentials are still needed for a Gatekeeper-friendly public distribution.
 
 Installed apps will check:
 
