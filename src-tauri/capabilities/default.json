@@ -3,5 +3,6 @@
   "identifier": "default",
   "description": "Default desktop capability",
   "windows": ["main"],
+  "urls": ["http://localhost:1421/*"],
   "permissions": ["core:default", "process:default", "updater:default"]
 }

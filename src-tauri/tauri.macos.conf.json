@@ -1,0 +1,15 @@
+{
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "url": "http://localhost:1421",
+        "title": "Mikcort",
+        "width": 980,
+        "height": 680,
+        "minWidth": 900,
+        "minHeight": 520
+      }
+    ]
+  }
+}
