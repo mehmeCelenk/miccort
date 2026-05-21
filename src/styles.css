@@ -19,6 +19,11 @@ body {
   overflow: hidden;
 }
 
+body.resizing-sidebar {
+  cursor: col-resize;
+  user-select: none;
+}
+
 button,
 input,
 select {
@@ -108,8 +113,15 @@ label {
   font-weight: 750;
 }
 
+.field-error {
+  color: #ffdce2;
+  font-size: 0.78rem;
+  font-weight: 800;
+}
+
 h1,
 h2,
+h3,
 p {
   margin: 0;
 }
@@ -370,7 +382,7 @@ h2 {
 
 .room-shell {
   display: grid;
-  grid-template-columns: 240px minmax(0, 1fr);
+  grid-template-columns: var(--sidebar-width, 240px) minmax(0, 1fr);
   width: 100vw;
   min-width: 900px;
   height: 100vh;
@@ -379,17 +391,52 @@ h2 {
 }
 
 .channel-sidebar {
+  position: relative;
   display: grid;
   min-height: 100vh;
+  min-width: 220px;
+  max-width: 420px;
   grid-template-rows: auto minmax(0, 1fr) auto;
   align-content: stretch;
   gap: 14px;
   padding: 14px;
+  overflow-x: clip;
   background: #1c2024;
 }
 
 .channel-sidebar {
   border-right: 1px solid #0f1113;
+}
+
+.sidebar-resizer {
+  position: absolute;
+  top: 0;
+  right: 0;
+  z-index: 12;
+  width: 6px;
+  height: 100%;
+  cursor: col-resize;
+}
+
+.sidebar-resizer::before {
+  position: absolute;
+  top: 12px;
+  right: 2px;
+  width: 2px;
+  height: calc(100% - 24px);
+  border-radius: 999px;
+  background: transparent;
+  content: "";
+  transition: background 140ms ease;
+}
+
+.sidebar-resizer:hover::before,
+.sidebar-resizer:focus-visible::before {
+  background: #9df2c6;
+}
+
+.sidebar-resizer:focus-visible {
+  outline: none;
 }
 
 .voice-dock {
@@ -418,7 +465,7 @@ h2 {
 
 .voice-stage {
   display: grid;
-  grid-template-rows: auto auto minmax(0, 1fr);
+  grid-template-rows: auto auto auto minmax(0, 1fr);
   min-width: 0;
   min-height: 0;
   gap: 10px;
@@ -492,8 +539,7 @@ h2 {
 
 .screen-share-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(420px, 1fr));
-  grid-auto-rows: minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr);
   gap: 10px;
   height: 100%;
   min-height: 0;
@@ -529,17 +575,67 @@ h2 {
 .screen-share-header {
   display: flex;
   align-items: center;
-  justify-content: space-between;
   min-width: 0;
   gap: 10px;
 }
 
+.panel-heading {
+  position: relative;
+  z-index: 1;
+  min-width: 0;
+}
+
+.panel-heading h2 {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.panel-heading span {
+  flex: 0 0 auto;
+}
+
 .screen-share-header strong {
+  flex: 1 1 auto;
   min-width: 0;
   overflow: hidden;
   color: #d8dfdc;
   font-size: 0.86rem;
   text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.screen-stop-watch {
+  color: #ffffff;
+  border-color: rgba(217, 79, 103, 0.52);
+  background: #d94f67;
+}
+
+.screen-status {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  gap: 8px;
+  border: 1px solid rgba(157, 242, 198, 0.32);
+  border-radius: 8px;
+  padding: 10px 12px;
+  color: #d8dfdc;
+  background: rgba(157, 242, 198, 0.1);
+  font-size: 0.84rem;
+  font-weight: 850;
+}
+
+.screen-status span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.screen-status strong {
+  margin-left: auto;
+  color: #9df2c6;
   white-space: nowrap;
 }
 
@@ -617,8 +713,12 @@ h2 {
 
 .shortcut-control {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 40px;
+  grid-template-columns: minmax(0, 1fr);
   gap: 8px;
+}
+
+.shortcut-control:has(.shortcut-clear) {
+  grid-template-columns: minmax(0, 1fr) 40px;
 }
 
 .shortcut-button {
@@ -683,7 +783,7 @@ h2 {
   display: grid;
   grid-template-columns: repeat(5, minmax(0, 1fr));
   align-items: center;
-  gap: 8px;
+  gap: 14px;
 }
 
 .dock-actions .icon-button {
@@ -779,7 +879,7 @@ h2 {
 
 .user-list {
   display: grid;
-  gap: 8px;
+  gap: 10px;
   padding: 0;
   margin: 0;
   list-style: none;
@@ -794,12 +894,14 @@ h2 {
 
 .user-list li {
   position: relative;
-  display: flex;
+  display: grid;
+  grid-template-columns: 38px minmax(0, 1fr) auto auto;
   align-items: center;
-  gap: 14px;
-  min-height: 50px;
+  column-gap: 10px;
+  min-width: 0;
+  min-height: 58px;
   border-radius: 8px;
-  padding: 8px;
+  padding: 10px;
   border: 1px solid transparent;
   background: #252a2f;
   transition:
@@ -821,16 +923,47 @@ h2 {
 .user-list strong {
   overflow: hidden;
   color: #f4f7f5;
+  line-height: 1.2;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .member-info {
-  flex: 1 1 auto;
-  padding-left: 2px;
+  display: grid;
+  align-content: center;
+  min-width: 0;
+  min-height: 38px;
+}
+
+.live-badge {
+  max-width: 82px;
+  min-height: 24px;
+  border: 1px solid rgba(217, 79, 103, 0.42);
+  border-radius: 999px;
+  padding: 0 8px;
+  overflow: hidden;
+  color: #ffffff;
+  background: #d94f67;
+  font-size: 0.68rem;
+  font-weight: 950;
+  text-overflow: ellipsis;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.live-badge.watching {
+  color: #d8dfdc;
+  border-color: rgba(157, 242, 198, 0.44);
+  background: #24342d;
+}
+
+.live-badge:disabled {
+  cursor: default;
+  opacity: 1;
 }
 
 .member-volume-button {
+  margin-left: 2px;
   color: #aeb9b4;
   background: #1c2024;
 }
@@ -856,6 +989,17 @@ h2 {
 .screen-menu {
   right: 10px;
   top: 10px;
+}
+
+.share-control {
+  position: relative;
+  min-width: 0;
+}
+
+.share-menu {
+  right: 0;
+  bottom: calc(100% + 10px);
+  min-width: 156px;
 }
 
 .popover-panel strong {
@@ -903,14 +1047,14 @@ h2 {
 
 .avatar {
   display: grid;
-  width: 34px;
-  height: 34px;
+  width: 38px;
+  height: 38px;
   flex: 0 0 auto;
   place-items: center;
   border-radius: 12px;
   color: #101315;
   background: #9df2c6;
-  font-size: 0.72rem;
+  font-size: 0.78rem;
   font-weight: 950;
 }
 
@@ -920,7 +1064,7 @@ h2 {
   right: 0;
   z-index: 10;
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr) auto;
+  grid-template-rows: auto minmax(0, 1fr);
   width: min(360px, 100vw);
   height: 100vh;
   align-content: start;
@@ -971,12 +1115,74 @@ h2 {
   overflow-wrap: anywhere;
 }
 
-.drawer-grid {
-  grid-template-columns: 1fr;
+.settings-sections {
+  display: grid;
+  align-content: start;
+  gap: 18px;
+  min-width: 0;
 }
 
-.drawer-toggles {
+.settings-section {
   display: grid;
+  gap: 10px;
+  min-width: 0;
+  padding-top: 16px;
+  border-top: 1px solid #30363b;
+}
+
+.settings-section:first-child {
+  padding-top: 0;
+  border-top: 0;
+}
+
+.settings-section h3 {
+  color: #f4f7f5;
+  font-size: 0.78rem;
+  font-weight: 900;
+  letter-spacing: 0;
+}
+
+.settings-list {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+}
+
+.setting-item {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  border: 1px solid #30363b;
+  border-radius: 8px;
+  padding: 12px;
+  color: #aeb9b4;
+  background: #151719;
+}
+
+.setting-label {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.setting-item small {
+  color: #aeb9b4;
+  font-weight: 800;
+}
+
+.setting-toggle-list {
+  grid-template-columns: repeat(auto-fit, minmax(145px, 1fr));
+}
+
+.setting-toggle {
+  grid-template-columns: 16px minmax(0, 1fr);
+  align-items: center;
+  min-height: 46px;
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+}
+
+.setting-toggle input[type="checkbox"] {
+  justify-self: start;
 }
 
 .error {

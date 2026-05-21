@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue';
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue';
 import { Headphones, Maximize2, Minimize2, MonitorUp, Mic, MicOff, PhoneOff, Settings, Volume2, VolumeX, X } from 'lucide-vue-next';
 
 type SignalType =
@@ -90,6 +90,9 @@ const remoteScreens = ref<RemoteScreenShare[]>([]);
 const activeMemberVolumeUser = ref<string | null>(null);
 const activeScreenMenuUser = ref<string | null>(null);
 const fullscreenScreenUser = ref<string | null>(null);
+const viewingScreenUser = ref<string | null>(null);
+const screenShareMenuOpen = ref(false);
+const sidebarWidth = ref(clampSidebarWidth(Number(readStoredValue('mikcort:sidebar-width', '240')) || 240));
 
 let socket: WebSocket | null = null;
 let rawLocalStream: MediaStream | null = null;
@@ -103,7 +106,9 @@ let micSensitivityAnalyser: AnalyserNode | null = null;
 let micSensitivityTimer: number | undefined;
 let reconnectTimer: number | undefined;
 let heartbeatTimer: number | undefined;
+let errorTimer: number | undefined;
 let intentionallyClosed = false;
+let stopSidebarResize: (() => void) | null = null;
 const peers = new Map<string, RTCPeerConnection>();
 const queuedCandidates = new Map<string, RTCIceCandidateInit[]>();
 const remoteAnalyzers = new Map<string, { context: AudioContext; timer: number }>();
@@ -117,6 +122,8 @@ const peerRecoveryAttempts = new Map<string, number>();
 const remoteTrackRecoveryTimers = new Map<string, number>();
 const otherUsers = computed(() => users.value.filter((userId) => userId !== currentUserId.value));
 const connectionLabel = computed(() => (wsOpen.value ? 'Connected' : 'Offline'));
+const viewedScreenShare = computed(() => remoteScreens.value.find((share) => share.userId === viewingScreenUser.value) ?? null);
+const viewedScreenUserId = computed(() => viewedScreenShare.value?.userId ?? '');
 const voiceState = computed(() => {
   if (!micStarted.value) {
     return 'Ready';
@@ -132,6 +139,17 @@ onMounted(() => {
   navigator.mediaDevices?.addEventListener('devicechange', loadDevices);
 });
 onBeforeUnmount(cleanup);
+
+watch(error, (message) => {
+  clearErrorTimer();
+  if (!message) {
+    return;
+  }
+  errorTimer = window.setTimeout(() => {
+    error.value = '';
+    errorTimer = undefined;
+  }, 2000);
+});
 
 function connect() {
   clearReconnectTimer();
@@ -201,6 +219,13 @@ function clearHeartbeat() {
   if (heartbeatTimer) {
     window.clearInterval(heartbeatTimer);
     heartbeatTimer = undefined;
+  }
+}
+
+function clearErrorTimer() {
+  if (errorTimer) {
+    window.clearTimeout(errorTimer);
+    errorTimer = undefined;
   }
 }
 
@@ -373,6 +398,9 @@ function remoteElementVolume(audio: HTMLAudioElement) {
   }
   const userId = audio.dataset.userId ?? '';
   const source = audio.dataset.source;
+  if (source === 'screen' && viewingScreenUser.value !== userId) {
+    return 0;
+  }
   const sourceVolume = source === 'screen' ? (screenVolumes[userId] ?? 100) : (memberVolumes[userId] ?? 100);
   return (outputVolume.value / 100) * (sourceVolume / 100);
 }
@@ -387,25 +415,7 @@ function screenShareVideoConstraints(): MediaTrackConstraints {
 }
 
 function normalizedScreenFps() {
-  return Math.min(60, Math.max(30, Number(selectedScreenFps.value) || 30));
-}
-
-async function applyScreenFpsSettings() {
-  selectedScreenFps.value = normalizedScreenFps();
-  if (!screenStream) {
-    return;
-  }
-
-  const constraints = screenShareVideoConstraints();
-  await Promise.all(screenStream.getVideoTracks().map((track) => track.applyConstraints(constraints).catch(() => undefined)));
-
-  for (const peer of peers.values()) {
-    for (const sender of peer.getSenders()) {
-      if (senderSources.get(sender) === 'screen' && sender.track?.kind === 'video') {
-        configureSender(sender, sender.track, 'screen');
-      }
-    }
-  }
+  return Number(selectedScreenFps.value) >= 60 ? 60 : 30;
 }
 
 function toggleMute() {
@@ -449,41 +459,51 @@ function toggleDeafen() {
   playVoiceFeedback(nextDeafened ? 'deafen' : 'undeafen', wasDeafened);
 }
 
-function playVoiceFeedback(type: 'mute' | 'unmute' | 'deafen' | 'undeafen', wasDeafened = false) {
-  if ((deafened.value && type !== 'deafen') || (wasDeafened && type !== 'undeafen') || outputVolume.value <= 0) {
+function playVoiceFeedback(
+  type: 'mute' | 'unmute' | 'deafen' | 'undeafen' | 'screen-start' | 'screen-stop' | 'user-join' | 'user-leave',
+  wasDeafened = false,
+) {
+  const isScreenFeedback = type === 'screen-start' || type === 'screen-stop';
+  if (((deafened.value && type !== 'deafen') || (wasDeafened && type !== 'undeafen')) && !isScreenFeedback) {
     return;
   }
 
   feedbackAudioContext ??= new AudioContext();
   const context = feedbackAudioContext;
-  void context.resume();
-  const now = context.currentTime;
-  const master = context.createGain();
-  master.gain.setValueAtTime(0.0001, now);
-  master.gain.exponentialRampToValueAtTime(0.18 * (outputVolume.value / 100), now + 0.012);
-  master.gain.exponentialRampToValueAtTime(0.0001, now + 0.28);
-  master.connect(context.destination);
+  void context.resume().then(() => {
+    const now = context.currentTime;
+    const master = context.createGain();
+    const volume = isScreenFeedback ? 0.48 : 0.3 * (outputVolume.value / 100);
+    master.gain.setValueAtTime(0.0001, now);
+    master.gain.exponentialRampToValueAtTime(volume, now + 0.012);
+    master.gain.exponentialRampToValueAtTime(0.0001, now + 0.36);
+    master.connect(context.destination);
 
-  const tones = {
-    mute: [520, 330],
-    unmute: [330, 560],
-    deafen: [420, 250],
-    undeafen: [250, 420],
-  }[type];
+    const tones = {
+      mute: [520, 330],
+      unmute: [330, 560],
+      deafen: [420, 250],
+      undeafen: [250, 420],
+      'screen-start': [440, 660, 880],
+      'screen-stop': [760, 540, 360],
+      'user-join': [392, 523, 659],
+      'user-leave': [659, 523, 392],
+    }[type];
 
-  tones.forEach((frequency, index) => {
-    const oscillator = context.createOscillator();
-    const gain = context.createGain();
-    const start = now + index * 0.09;
-    oscillator.type = 'sine';
-    oscillator.frequency.setValueAtTime(frequency, start);
-    gain.gain.setValueAtTime(0.0001, start);
-    gain.gain.exponentialRampToValueAtTime(1, start + 0.01);
-    gain.gain.exponentialRampToValueAtTime(0.0001, start + 0.12);
-    oscillator.connect(gain);
-    gain.connect(master);
-    oscillator.start(start);
-    oscillator.stop(start + 0.13);
+    tones.forEach((frequency, index) => {
+      const oscillator = context.createOscillator();
+      const gain = context.createGain();
+      const start = now + index * 0.09;
+      oscillator.type = 'sine';
+      oscillator.frequency.setValueAtTime(frequency, start);
+      gain.gain.setValueAtTime(0.0001, start);
+      gain.gain.exponentialRampToValueAtTime(1, start + 0.01);
+      gain.gain.exponentialRampToValueAtTime(0.0001, start + 0.14);
+      oscillator.connect(gain);
+      gain.connect(master);
+      oscillator.start(start);
+      oscillator.stop(start + 0.16);
+    });
   });
 }
 
@@ -518,6 +538,7 @@ async function handleSignal(message: SignalMessage) {
       if (message.userId && message.userId !== currentUserId.value) {
         registerUser((message.payload as UserSummary | undefined) ?? message.userId);
         users.value = unique([...users.value, message.userId]);
+        playVoiceFeedback('user-join');
         if (localStream) {
           await ensurePeer(message.userId, false);
         }
@@ -527,6 +548,9 @@ async function handleSignal(message: SignalMessage) {
       if (message.userId) {
         users.value = users.value.filter((userId) => userId !== message.userId);
         closePeer(message.userId);
+        if (message.userId !== currentUserId.value) {
+          playVoiceFeedback('user-leave');
+        }
       }
       break;
     case 'offer':
@@ -940,6 +964,7 @@ function toggleMemberVolumePopover(userId: string) {
     return;
   }
   activeScreenMenuUser.value = null;
+  screenShareMenuOpen.value = false;
   activeMemberVolumeUser.value = activeMemberVolumeUser.value === userId ? null : userId;
 }
 
@@ -954,12 +979,14 @@ function setScreenVolumeFromEvent(userId: string, event: Event) {
 
 function openScreenMenu(userId: string) {
   activeMemberVolumeUser.value = null;
+  screenShareMenuOpen.value = false;
   activeScreenMenuUser.value = userId;
 }
 
 function closePopovers() {
   activeMemberVolumeUser.value = null;
   activeScreenMenuUser.value = null;
+  screenShareMenuOpen.value = false;
 }
 
 function handleKeydown(event: KeyboardEvent) {
@@ -1058,19 +1085,23 @@ async function toggleScreenShare() {
   if (sharingScreen.value) {
     await stopScreenShare();
   } else {
-    await startScreenShare();
+    screenShareMenuOpen.value = !screenShareMenuOpen.value;
   }
 }
 
-async function startScreenShare() {
+async function startScreenShare(fps = selectedScreenFps.value) {
   try {
     error.value = '';
+    selectedScreenFps.value = fps === 60 ? 60 : 30;
+    screenShareMenuOpen.value = false;
     const videoConstraints = screenShareVideoConstraints();
     screenStream = await navigator.mediaDevices.getDisplayMedia({
       video: videoConstraints,
       audio: true,
     });
     sharingScreen.value = true;
+    status.value = `Sharing your screen at ${selectedScreenFps.value} FPS.`;
+    playVoiceFeedback('screen-start');
 
     const [track] = screenStream.getVideoTracks();
     await track?.applyConstraints(videoConstraints).catch(() => undefined);
@@ -1115,11 +1146,19 @@ function configureSender(sender: RTCRtpSender, track: MediaStreamTrack, source: 
 }
 
 async function stopScreenShare() {
+  if (!screenStream && !sharingScreen.value) {
+    return;
+  }
+
   const stoppedStream = screenStream;
   const stoppedTrackIds = new Set(stoppedStream?.getTracks().map((track) => track.id) ?? []);
   screenStream = null;
   sharingScreen.value = false;
+  screenShareMenuOpen.value = false;
   stoppedStream?.getTracks().forEach((track) => track.stop());
+  if (stoppedStream) {
+    playVoiceFeedback('screen-stop');
+  }
 
   for (const [userId, peer] of peers) {
     for (const sender of peer.getSenders()) {
@@ -1132,6 +1171,7 @@ async function stopScreenShare() {
       await sendOffer(userId, peer);
     }
   }
+  status.value = micStarted.value ? 'Microphone is on.' : 'Ready';
 }
 
 function attachRemoteScreen(userId: string, stream: MediaStream) {
@@ -1184,11 +1224,102 @@ function removeRemoteScreen(userId: string) {
   if (fullscreenScreenUser.value === userId) {
     fullscreenScreenUser.value = null;
   }
+  if (viewingScreenUser.value === userId) {
+    viewingScreenUser.value = null;
+    updateRemoteAudioSettings();
+  }
 }
 
 function toggleScreenFullscreen(userId: string) {
   fullscreenScreenUser.value = fullscreenScreenUser.value === userId ? null : userId;
   activeScreenMenuUser.value = null;
+}
+
+function viewScreenShare(userId: string) {
+  viewingScreenUser.value = userId;
+  activeMemberVolumeUser.value = null;
+  activeScreenMenuUser.value = null;
+  screenShareMenuOpen.value = false;
+  updateRemoteAudioSettings();
+}
+
+function toggleScreenShareView(userId: string) {
+  if (userId === currentUserId.value) {
+    return;
+  }
+  if (viewingScreenUser.value === userId) {
+    stopViewingScreenShare();
+  } else {
+    viewScreenShare(userId);
+  }
+}
+
+function stopViewingScreenShare() {
+  fullscreenScreenUser.value = null;
+  viewingScreenUser.value = null;
+  activeScreenMenuUser.value = null;
+  updateRemoteAudioSettings();
+}
+
+function isUserSharingScreen(userId: string) {
+  return userId === currentUserId.value ? sharingScreen.value : remoteScreens.value.some((share) => share.userId === userId);
+}
+
+function screenShareBadgeLabel(userId: string) {
+  return viewingScreenUser.value === userId ? 'Watching' : 'Live';
+}
+
+function clampSidebarWidth(value: number) {
+  return Math.min(420, Math.max(220, Math.round(value)));
+}
+
+function saveSidebarWidth() {
+  localStorage.setItem('mikcort:sidebar-width', String(sidebarWidth.value));
+}
+
+function startSidebarResize(event: PointerEvent) {
+  event.preventDefault();
+  stopSidebarResize?.();
+
+  const startX = event.clientX;
+  const startWidth = sidebarWidth.value;
+
+  document.body.classList.add('resizing-sidebar');
+
+  const handlePointerMove = (moveEvent: PointerEvent) => {
+    sidebarWidth.value = clampSidebarWidth(startWidth + moveEvent.clientX - startX);
+  };
+
+  const finishResize = () => {
+    document.body.classList.remove('resizing-sidebar');
+    window.removeEventListener('pointermove', handlePointerMove);
+    window.removeEventListener('pointerup', finishResize);
+    window.removeEventListener('pointercancel', finishResize);
+    stopSidebarResize = null;
+    saveSidebarWidth();
+  };
+
+  stopSidebarResize = finishResize;
+  window.addEventListener('pointermove', handlePointerMove);
+  window.addEventListener('pointerup', finishResize);
+  window.addEventListener('pointercancel', finishResize);
+}
+
+function resizeSidebarWithKeyboard(event: KeyboardEvent) {
+  if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) {
+    return;
+  }
+  event.preventDefault();
+
+  if (event.key === 'Home') {
+    sidebarWidth.value = 220;
+  } else if (event.key === 'End') {
+    sidebarWidth.value = 420;
+  } else {
+    sidebarWidth.value = clampSidebarWidth(sidebarWidth.value + (event.key === 'ArrowRight' ? 16 : -16));
+  }
+
+  saveSidebarWidth();
 }
 
 function closePeer(userId: string) {
@@ -1211,6 +1342,8 @@ function closePeer(userId: string) {
 
 function cleanup() {
   intentionallyClosed = true;
+  stopSidebarResize?.();
+  clearErrorTimer();
   clearHeartbeat();
   clearReconnectTimer();
   window.removeEventListener('keydown', handleKeydown);
@@ -1328,21 +1461,31 @@ function displayName(userId: string) {
 }
 
 function initials(userId: string) {
-  return displayName(userId)
+  const letters = displayName(userId)
     .split(/\s+/)
     .filter(Boolean)
     .slice(0, 2)
     .map((part) => part[0])
     .join('')
-    .toUpperCase()
-    .padEnd(2, userId[0]?.toUpperCase() ?? 'M')
-    .slice(0, 2);
+    .toUpperCase();
+
+  return letters || 'M';
 }
 </script>
 
 <template>
-  <section class="room-shell" @click="closePopovers">
+  <section class="room-shell" :style="{ '--sidebar-width': `${sidebarWidth}px` }" @click="closePopovers">
     <aside class="channel-sidebar">
+      <div
+        class="sidebar-resizer"
+        role="separator"
+        aria-label="Resize members sidebar"
+        aria-orientation="vertical"
+        tabindex="0"
+        @pointerdown="startSidebarResize"
+        @keydown="resizeSidebarWithKeyboard"
+      ></div>
+
       <div class="deck-members">
         <div class="panel-heading">
           <h2>Members</h2>
@@ -1358,8 +1501,18 @@ function initials(userId: string) {
             <span class="avatar">{{ initials(userId) }}</span>
             <div class="member-info">
               <strong>{{ displayName(userId) }}</strong>
-              <small>{{ userId === currentUserId ? (deafened ? 'deafened' : muted ? 'muted' : 'local') : peerStates[userId] ?? 'waiting' }}</small>
             </div>
+            <button
+              v-if="isUserSharingScreen(userId)"
+              type="button"
+              class="live-badge"
+              :class="{ watching: viewingScreenUser === userId }"
+              :disabled="userId === currentUserId"
+              :title="userId === currentUserId ? 'You are sharing your screen' : viewingScreenUser === userId ? 'Stop watching stream' : 'Watch stream'"
+              @click.stop="toggleScreenShareView(userId)"
+            >
+              {{ screenShareBadgeLabel(userId) }}
+            </button>
             <button
               v-if="userId !== currentUserId"
               type="button"
@@ -1396,7 +1549,7 @@ function initials(userId: string) {
           <span class="avatar">{{ initials(currentUserId) }}</span>
           <div>
             <strong>{{ displayName(currentUserId) }}</strong>
-            <small>{{ deafened ? 'Audio off' : voiceState }}</small>
+            <small>{{ sharingScreen ? `Sharing screen - ${selectedScreenFps} FPS` : deafened ? 'Audio off' : voiceState }}</small>
           </div>
         </div>
 
@@ -1437,16 +1590,28 @@ function initials(userId: string) {
             <Settings :size="20" />
           </button>
 
-          <button
-            type="button"
-            class="icon-button"
-            :class="{ active: sharingScreen }"
-            :data-tooltip="sharingScreen ? 'Stop sharing' : 'Share screen'"
-            :title="sharingScreen ? 'Stop screen share' : 'Share screen'"
-            @click="toggleScreenShare"
-          >
-            <MonitorUp :size="20" />
-          </button>
+          <div class="share-control">
+            <button
+              type="button"
+              class="icon-button"
+              :class="{ active: sharingScreen, selected: screenShareMenuOpen }"
+              :data-tooltip="sharingScreen ? 'Stop sharing' : 'Share screen'"
+              :title="sharingScreen ? 'Stop screen share' : 'Share screen'"
+              @click.stop="toggleScreenShare"
+            >
+              <MonitorUp :size="20" />
+            </button>
+            <div v-if="screenShareMenuOpen" class="share-menu popover-panel" @click.stop>
+              <button type="button" class="menu-action" @click="startScreenShare(30)">
+                <MonitorUp :size="16" />
+                30 FPS
+              </button>
+              <button type="button" class="menu-action" @click="startScreenShare(60)">
+                <MonitorUp :size="16" />
+                60 FPS
+              </button>
+            </div>
+          </div>
 
           <button type="button" class="icon-button leave-button" data-tooltip="Leave room" title="Leave room" @click="leave">
             <PhoneOff :size="20" />
@@ -1471,43 +1636,57 @@ function initials(userId: string) {
 
       <p v-if="error" class="error">{{ error }}</p>
 
-      <section v-if="remoteScreens.length" class="screen-share-grid" aria-label="Screen shares">
+      <div v-if="sharingScreen" class="screen-status">
+        <MonitorUp :size="16" />
+        <span>You are sharing your screen</span>
+        <strong>{{ selectedScreenFps }} FPS</strong>
+      </div>
+
+      <section v-if="viewedScreenUserId" class="screen-share-grid" aria-label="Screen share">
         <article
-          v-for="share in remoteScreens"
-          :key="share.userId"
-          :class="['screen-share-tile', { fullscreen: fullscreenScreenUser === share.userId }]"
-          @contextmenu.prevent.stop="openScreenMenu(share.userId)"
+          :key="viewedScreenUserId"
+          :class="['screen-share-tile', { fullscreen: fullscreenScreenUser === viewedScreenUserId }]"
+          @contextmenu.prevent.stop="openScreenMenu(viewedScreenUserId)"
           @click.stop="closePopovers"
         >
           <div class="screen-share-header">
-            <strong>{{ displayName(share.userId) }} is sharing</strong>
+            <strong>{{ displayName(viewedScreenUserId) }} is sharing</strong>
             <button
               type="button"
               class="icon-button compact-button"
-              :data-tooltip="fullscreenScreenUser === share.userId ? 'Exit fullscreen' : 'Fullscreen'"
-              :title="fullscreenScreenUser === share.userId ? 'Exit fullscreen' : 'Fullscreen'"
-              @click.stop="toggleScreenFullscreen(share.userId)"
+              :data-tooltip="fullscreenScreenUser === viewedScreenUserId ? 'Exit fullscreen' : 'Fullscreen'"
+              :title="fullscreenScreenUser === viewedScreenUserId ? 'Exit fullscreen' : 'Fullscreen'"
+              @click.stop="toggleScreenFullscreen(viewedScreenUserId)"
             >
-              <Minimize2 v-if="fullscreenScreenUser === share.userId" :size="18" />
+              <Minimize2 v-if="fullscreenScreenUser === viewedScreenUserId" :size="18" />
               <Maximize2 v-else :size="18" />
+            </button>
+            <button
+              type="button"
+              class="icon-button compact-button screen-stop-watch"
+              data-tooltip="Stop watching"
+              title="Stop watching"
+              @click.stop="stopViewingScreenShare"
+            >
+              <X :size="18" />
             </button>
           </div>
 
           <div class="screen-video-wrap">
             <video
-              :ref="(element) => setScreenVideoElement(element as Element | null, share.userId)"
-              :data-user-id="share.userId"
+              :ref="(element) => setScreenVideoElement(element as Element | null, viewedScreenUserId)"
+              :data-user-id="viewedScreenUserId"
               autoplay
               playsinline
               muted
-              @dblclick.stop="toggleScreenFullscreen(share.userId)"
+              @dblclick.stop="toggleScreenFullscreen(viewedScreenUserId)"
             ></video>
 
-            <div v-if="activeScreenMenuUser === share.userId" class="screen-menu popover-panel" @click.stop>
-              <button type="button" class="menu-action" @click="toggleScreenFullscreen(share.userId)">
-                <Minimize2 v-if="fullscreenScreenUser === share.userId" :size="16" />
+            <div v-if="activeScreenMenuUser === viewedScreenUserId" class="screen-menu popover-panel" @click.stop>
+              <button type="button" class="menu-action" @click="toggleScreenFullscreen(viewedScreenUserId)">
+                <Minimize2 v-if="fullscreenScreenUser === viewedScreenUserId" :size="16" />
                 <Maximize2 v-else :size="16" />
-                {{ fullscreenScreenUser === share.userId ? 'Exit fullscreen' : 'Fullscreen' }}
+                {{ fullscreenScreenUser === viewedScreenUserId ? 'Exit fullscreen' : 'Fullscreen' }}
               </button>
               <label class="popover-slider">
                 <span>
@@ -1518,10 +1697,10 @@ function initials(userId: string) {
                   type="range"
                   min="0"
                   max="100"
-                  :value="screenVolumes[share.userId] ?? 100"
-                  @input="setScreenVolumeFromEvent(share.userId, $event)"
+                  :value="screenVolumes[viewedScreenUserId] ?? 100"
+                  @input="setScreenVolumeFromEvent(viewedScreenUserId, $event)"
                 />
-                <small>{{ screenVolumes[share.userId] ?? 100 }}%</small>
+                <small>{{ screenVolumes[viewedScreenUserId] ?? 100 }}%</small>
               </label>
             </div>
           </div>
@@ -1540,101 +1719,114 @@ function initials(userId: string) {
         </button>
       </div>
 
-      <div class="settings-grid drawer-grid">
-        <label>
-          Microphone
-          <select v-model="selectedInputId" @change="applyAudioSettings">
-            <option v-for="device in inputDevices" :key="device.deviceId" :value="device.deviceId">
-              {{ device.label || 'Microphone' }}
-            </option>
-          </select>
-        </label>
+      <div class="settings-sections">
+        <section class="settings-section" aria-labelledby="device-settings-heading">
+          <h3 id="device-settings-heading">Devices</h3>
+          <div class="settings-list">
+            <label class="setting-item">
+              <span class="setting-label">Microphone</span>
+              <select v-model="selectedInputId" @change="applyAudioSettings">
+                <option v-for="device in inputDevices" :key="device.deviceId" :value="device.deviceId">
+                  {{ device.label || 'Microphone' }}
+                </option>
+              </select>
+            </label>
 
-        <label>
-          Output
-          <select v-model="selectedOutputId" @change="applyAudioSettings">
-            <option v-for="device in outputDevices" :key="device.deviceId" :value="device.deviceId">
-              {{ device.label || 'Speaker' }}
-            </option>
-          </select>
-        </label>
-
-        <label>
-          Mic gain
-          <input v-model.number="inputGain" type="range" min="0" max="200" @input="updateMicGain" />
-          <small>{{ inputGain }}%</small>
-        </label>
-
-        <label>
-          Input sensitivity
-          <input v-model.number="inputSensitivity" type="range" min="0" max="10" step="0.5" />
-          <small>{{ inputSensitivity > 0 ? `${inputSensitivity}%` : 'Off' }}</small>
-        </label>
-
-        <label>
-          Output volume
-          <input v-model.number="outputVolume" type="range" min="0" max="100" @input="updateRemoteAudioSettings" />
-          <small>{{ deafened ? 'Muted' : `${outputVolume}%` }}</small>
-        </label>
-
-        <label>
-          Screen FPS
-          <input v-model.number="selectedScreenFps" type="range" min="30" max="60" step="1" @input="applyScreenFpsSettings" />
-          <small>{{ selectedScreenFps }} FPS</small>
-        </label>
-
-        <div class="shortcut-row">
-          <span>Mute shortcut</span>
-          <div class="shortcut-control">
-            <button type="button" class="shortcut-button" @click="startShortcutCapture('mute')">
-              {{ capturingShortcut === 'mute' ? 'Press keys...' : muteShortcut ? formatShortcut(muteShortcut) : 'Not set' }}
-            </button>
-            <button
-              v-if="muteShortcut"
-              type="button"
-              class="icon-button compact-button shortcut-clear"
-              data-tooltip="Clear shortcut"
-              title="Clear shortcut"
-              @click="clearShortcut('mute')"
-            >
-              <X :size="15" />
-            </button>
+            <label class="setting-item">
+              <span class="setting-label">Output</span>
+              <select v-model="selectedOutputId" @change="applyAudioSettings">
+                <option v-for="device in outputDevices" :key="device.deviceId" :value="device.deviceId">
+                  {{ device.label || 'Speaker' }}
+                </option>
+              </select>
+            </label>
           </div>
-        </div>
+        </section>
 
-        <div class="shortcut-row">
-          <span>Deafen shortcut</span>
-          <div class="shortcut-control">
-            <button type="button" class="shortcut-button" @click="startShortcutCapture('deafen')">
-              {{ capturingShortcut === 'deafen' ? 'Press keys...' : deafenShortcut ? formatShortcut(deafenShortcut) : 'Not set' }}
-            </button>
-            <button
-              v-if="deafenShortcut"
-              type="button"
-              class="icon-button compact-button shortcut-clear"
-              data-tooltip="Clear shortcut"
-              title="Clear shortcut"
-              @click="clearShortcut('deafen')"
-            >
-              <X :size="15" />
-            </button>
+        <section class="settings-section" aria-labelledby="level-settings-heading">
+          <h3 id="level-settings-heading">Levels</h3>
+          <div class="settings-list">
+            <label class="setting-item">
+              <span class="setting-label">Mic gain</span>
+              <input v-model.number="inputGain" type="range" min="0" max="200" @input="updateMicGain" />
+              <small>{{ inputGain }}%</small>
+            </label>
+
+            <label class="setting-item">
+              <span class="setting-label">Input sensitivity</span>
+              <input v-model.number="inputSensitivity" type="range" min="0" max="10" step="0.5" />
+              <small>{{ inputSensitivity > 0 ? `${inputSensitivity}%` : 'Off' }}</small>
+            </label>
+
+            <label class="setting-item">
+              <span class="setting-label">Output volume</span>
+              <input v-model.number="outputVolume" type="range" min="0" max="100" @input="updateRemoteAudioSettings" />
+              <small>{{ deafened ? 'Muted' : `${outputVolume}%` }}</small>
+            </label>
+
           </div>
-        </div>
-      </div>
+        </section>
 
-      <div class="toggle-row drawer-toggles">
-        <label>
-          <input v-model="noiseSuppression" type="checkbox" @change="applyAudioSettings" />
-          Noise suppression
-        </label>
-        <label>
-          <input v-model="echoCancellation" type="checkbox" @change="applyAudioSettings" />
-          Echo cancellation
-        </label>
-        <label>
-          <input v-model="autoGainControl" type="checkbox" @change="applyAudioSettings" />
-          Auto gain
-        </label>
+        <section class="settings-section" aria-labelledby="shortcut-settings-heading">
+          <h3 id="shortcut-settings-heading">Shortcuts</h3>
+          <div class="settings-list">
+            <div class="setting-item shortcut-row">
+              <span class="setting-label">Mute shortcut</span>
+              <div class="shortcut-control">
+                <button type="button" class="shortcut-button" @click="startShortcutCapture('mute')">
+                  {{ capturingShortcut === 'mute' ? 'Press keys...' : muteShortcut ? formatShortcut(muteShortcut) : 'Not set' }}
+                </button>
+                <button
+                  v-if="muteShortcut"
+                  type="button"
+                  class="icon-button compact-button shortcut-clear"
+                  data-tooltip="Clear shortcut"
+                  title="Clear shortcut"
+                  @click="clearShortcut('mute')"
+                >
+                  <X :size="15" />
+                </button>
+              </div>
+            </div>
+
+            <div class="setting-item shortcut-row">
+              <span class="setting-label">Deafen shortcut</span>
+              <div class="shortcut-control">
+                <button type="button" class="shortcut-button" @click="startShortcutCapture('deafen')">
+                  {{ capturingShortcut === 'deafen' ? 'Press keys...' : deafenShortcut ? formatShortcut(deafenShortcut) : 'Not set' }}
+                </button>
+                <button
+                  v-if="deafenShortcut"
+                  type="button"
+                  class="icon-button compact-button shortcut-clear"
+                  data-tooltip="Clear shortcut"
+                  title="Clear shortcut"
+                  @click="clearShortcut('deafen')"
+                >
+                  <X :size="15" />
+                </button>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="settings-section" aria-labelledby="processing-settings-heading">
+          <h3 id="processing-settings-heading">Processing</h3>
+          <div class="settings-list settings-toggle-list">
+            <label class="setting-item setting-toggle">
+              <input v-model="noiseSuppression" type="checkbox" @change="applyAudioSettings" />
+              <span>Noise suppression</span>
+            </label>
+            <label class="setting-item setting-toggle">
+              <input v-model="echoCancellation" type="checkbox" @change="applyAudioSettings" />
+              <span>Echo cancellation</span>
+            </label>
+            <label class="setting-item setting-toggle">
+              <input v-model="autoGainControl" type="checkbox" @change="applyAudioSettings" />
+              <span>Auto gain</span>
+            </label>
+          </div>
+        </section>
       </div>
     </aside>
 
