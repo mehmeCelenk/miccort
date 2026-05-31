@@ -214,6 +214,14 @@ func (h *Hub) leaveLocked(client *Client) (string, string, []*Client) {
 		return "", "", nil
 	}
 
+	roomClients := h.clients[roomID]
+	if roomClients != nil && roomClients[userID] != client {
+		client.RoomID = ""
+		client.UserID = ""
+		client.DisplayName = ""
+		return "", "", nil
+	}
+
 	r := h.rooms[roomID]
 	if r != nil {
 		r.Remove(userID)
@@ -222,12 +230,12 @@ func (h *Hub) leaveLocked(client *Client) (string, string, []*Client) {
 		}
 	}
 
-	delete(h.clients[roomID], userID)
-	others := make([]*Client, 0, len(h.clients[roomID]))
-	for _, other := range h.clients[roomID] {
+	delete(roomClients, userID)
+	others := make([]*Client, 0, len(roomClients))
+	for _, other := range roomClients {
 		others = append(others, other)
 	}
-	if len(h.clients[roomID]) == 0 {
+	if len(roomClients) == 0 {
 		delete(h.clients, roomID)
 	}
 

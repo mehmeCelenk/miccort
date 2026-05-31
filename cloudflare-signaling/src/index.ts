@@ -192,6 +192,10 @@ export class SignalingHub extends DurableObject<Env> {
       return;
     }
 
+    if (room.get(session.userId)?.socket !== socket) {
+      return;
+    }
+
     room.delete(session.userId);
     if (room.size === 0) {
       this.rooms.delete(session.roomId);

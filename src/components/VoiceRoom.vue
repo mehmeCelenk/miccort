@@ -120,6 +120,7 @@ const peerRecoveryTimers = new Map<string, number>();
 const peerHeartbeats = new Map<string, { channel: RTCDataChannel; timer?: number; lastSeen: number }>();
 const peerRecoveryAttempts = new Map<string, number>();
 const remoteTrackRecoveryTimers = new Map<string, number>();
+const pendingOffers = new Map<string, RTCOfferOptions | undefined>();
 const otherUsers = computed(() => users.value.filter((userId) => userId !== currentUserId.value));
 const connectionLabel = computed(() => (wsOpen.value ? 'Connected' : 'Offline'));
 const viewedScreenShare = computed(() => remoteScreens.value.find((share) => share.userId === viewingScreenUser.value) ?? null);
@@ -564,6 +565,7 @@ async function handleSignal(message: SignalMessage) {
         if (peer && peer.signalingState === 'have-local-offer') {
           await peer.setRemoteDescription(message.payload as RTCSessionDescriptionInit).catch(() => undefined);
           await flushQueuedCandidates(message.userId, peer);
+          await flushPendingOffer(message.userId, peer);
         }
       }
       break;
@@ -606,10 +608,42 @@ async function ensurePeer(userId: string, makeOffer: boolean) {
   }
 
   if (makeOffer) {
-    await sendOffer(userId, peer);
+    await requestPeerOffer(userId, peer);
   }
 
   return peer;
+}
+
+async function requestPeerOffer(userId: string, peer: RTCPeerConnection, options?: RTCOfferOptions) {
+  const offerSent = await sendOffer(userId, peer, options);
+  if (!offerSent && peer.signalingState !== 'closed') {
+    pendingOffers.set(userId, mergeOfferOptions(pendingOffers.get(userId), options));
+  }
+  return offerSent;
+}
+
+async function flushPendingOffer(userId: string, peer: RTCPeerConnection) {
+  if (peer.signalingState !== 'stable' || socket?.readyState !== WebSocket.OPEN || !pendingOffers.has(userId)) {
+    return;
+  }
+
+  const options = pendingOffers.get(userId);
+  pendingOffers.delete(userId);
+  await requestPeerOffer(userId, peer, options);
+}
+
+function mergeOfferOptions(current: RTCOfferOptions | undefined, next: RTCOfferOptions | undefined) {
+  if (!current) {
+    return next;
+  }
+  if (!next) {
+    return current;
+  }
+  return {
+    ...current,
+    ...next,
+    iceRestart: Boolean(current.iceRestart || next.iceRestart),
+  };
 }
 
 async function sendOffer(userId: string, peer: RTCPeerConnection, options?: RTCOfferOptions) {
@@ -668,6 +702,9 @@ function createPeer(userId: string) {
 
   peer.onconnectionstatechange = () => handlePeerConnectionState(userId, peer);
   peer.oniceconnectionstatechange = () => handlePeerConnectionState(userId, peer);
+  peer.onsignalingstatechange = () => {
+    void flushPendingOffer(userId, peer);
+  };
 
   peer.ontrack = (event) => {
     if (event.track.kind === 'audio') {
@@ -732,7 +769,7 @@ async function recoverPeer(userId: string, peer: RTCPeerConnection) {
     return;
   }
 
-  const offerSent = await sendOffer(userId, peer, { iceRestart: true });
+  const offerSent = await requestPeerOffer(userId, peer, { iceRestart: true });
   if (!offerSent) {
     await rebuildPeer(userId);
     return;
@@ -899,6 +936,7 @@ async function receiveOffer(userId: string, offer: RTCSessionDescriptionInit) {
     targetUserId: userId,
     payload: answer,
   });
+  await flushPendingOffer(userId, peer);
 }
 
 async function receiveCandidate(userId: string, candidate: RTCIceCandidateInit) {
@@ -920,9 +958,23 @@ async function flushQueuedCandidates(userId: string, peer: RTCPeerConnection) {
   }
 }
 
-function attachRemoteAudio(userId: string, stream: MediaStream, source: 'mic' | 'screen') {
+function attachRemoteAudio(userId: string, stream: MediaStream | undefined, source: 'mic' | 'screen') {
   const host = remoteAudio.value;
-  if (!host || host.querySelector(`[data-user-id="${userId}"][data-source="${source}"]`)) {
+  if (!host || !stream) {
+    return;
+  }
+
+  const existing = host.querySelector(`[data-user-id="${userId}"][data-source="${source}"]`) as HTMLAudioElement | null;
+  if (existing) {
+    if (existing.srcObject !== stream) {
+      existing.srcObject = stream;
+      attachRemoteTrackRecovery(userId, stream, source, existing);
+      if (source === 'mic') {
+        startSpeakingDetection(userId, stream);
+      }
+    }
+    startRemoteAudioPlayback(userId, source, existing);
+    updateRemoteAudioSettings();
     return;
   }
 
@@ -936,6 +988,12 @@ function attachRemoteAudio(userId: string, stream: MediaStream, source: 'mic' | 
   if (source === 'mic') {
     startSpeakingDetection(userId, stream);
   }
+  attachRemoteTrackRecovery(userId, stream, source, audio);
+  startRemoteAudioPlayback(userId, source, audio);
+  updateRemoteAudioSettings();
+}
+
+function attachRemoteTrackRecovery(userId: string, stream: MediaStream, source: 'mic' | 'screen', audio: HTMLAudioElement) {
   stream.getTracks().forEach((track) => {
     track.addEventListener('mute', () => scheduleRemoteTrackRecovery(userId, source));
     track.addEventListener('unmute', () => clearRemoteTrackRecovery(userId, source));
@@ -947,7 +1005,21 @@ function attachRemoteAudio(userId: string, stream: MediaStream, source: 'mic' | 
       }
     });
   });
-  updateRemoteAudioSettings();
+}
+
+function startRemoteAudioPlayback(userId: string, source: 'mic' | 'screen', audio: HTMLAudioElement) {
+  const tryPlay = () => {
+    if (!audio.isConnected) {
+      return;
+    }
+    void audio.play().then(
+      () => clearRemoteTrackRecovery(userId, source),
+      () => scheduleRemoteTrackRecovery(userId, source),
+    );
+  };
+
+  audio.addEventListener('canplay', tryPlay, { once: true });
+  tryPlay();
 }
 
 function setMemberVolume(userId: string, value: number) {
@@ -1168,7 +1240,7 @@ async function stopScreenShare() {
       }
     }
     if (peer.signalingState === 'stable') {
-      await sendOffer(userId, peer);
+      await requestPeerOffer(userId, peer);
     }
   }
   status.value = micStarted.value ? 'Microphone is on.' : 'Ready';
@@ -1329,6 +1401,7 @@ function closePeer(userId: string) {
   peers.delete(userId);
   queuedCandidates.delete(userId);
   makingOffers.delete(userId);
+  pendingOffers.delete(userId);
   peerRecoveryAttempts.delete(userId);
   clearRemoteTrackRecovery(userId);
   delete peerStates[userId];
