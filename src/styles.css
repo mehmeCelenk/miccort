@@ -718,9 +718,9 @@ h2 {
   align-self: end;
   justify-self: end;
   width: min(380px, 100%);
-  min-height: 260px;
-  max-height: min(470px, 100%);
+  height: min(470px, calc(100vh - 120px));
   min-width: 0;
+  min-height: 260px;
   border: 1px solid #30363b;
   border-radius: 8px;
   overflow: hidden;

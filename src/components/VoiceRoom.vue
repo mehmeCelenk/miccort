@@ -103,7 +103,7 @@ const inputDevices = ref<MediaDeviceInfo[]>([]);
 const outputDevices = ref<MediaDeviceInfo[]>([]);
 const selectedInputId = ref(readStoredValue('mikcort:audio:input-device', ''));
 const selectedOutputId = ref(readStoredValue('mikcort:audio:output-device', ''));
-const inputGain = ref(readStoredNumber('mikcort:audio:input-gain', 100, 0, 200));
+const inputGain = ref(readStoredNumber('mikcort:audio:input-gain', 100, 0, 100));
 const inputSensitivity = ref(readStoredNumber('mikcort:audio:input-sensitivity', 2, 0, 10));
 const outputVolume = ref(readStoredNumber('mikcort:audio:output-volume', 100, 0, 100));
 const selectedScreenFps = ref(readStoredNumber('mikcort:screen:fps', 30, 30, 60));
@@ -668,7 +668,7 @@ async function ensurePeer(userId: string, makeOffer: boolean) {
   if (localStream) {
     for (const track of localStream.getAudioTracks()) {
       if (!peer.getSenders().some((sender) => senderSources.get(sender) === 'mic')) {
-        await addMicSender(peer, track, localStream);
+        addSender(peer, track, localStream, 'mic');
       }
     }
   }
@@ -757,7 +757,6 @@ function createPeer(userId: string) {
     iceCandidatePoolSize: 4,
   });
 
-  peer.addTransceiver('audio', { direction: 'sendrecv' });
   setupPeerHeartbeat(userId, peer.createDataChannel('heartbeat', { ordered: false, maxRetransmits: 0 }));
   peer.ondatachannel = (event) => {
     if (event.channel.label === 'heartbeat') {
@@ -1383,22 +1382,6 @@ function addSender(peer: RTCPeerConnection, track: MediaStreamTrack, stream: Med
   senderSources.set(sender, source);
   configureSender(sender, track, source);
   return sender;
-}
-
-async function addMicSender(peer: RTCPeerConnection, track: MediaStreamTrack, stream: MediaStream) {
-  const reusableTransceiver = peer
-    .getTransceivers()
-    .find((transceiver) => transceiver.receiver.track.kind === 'audio' && !transceiver.sender.track && !senderSources.has(transceiver.sender));
-
-  if (!reusableTransceiver) {
-    return addSender(peer, track, stream, 'mic');
-  }
-
-  reusableTransceiver.direction = 'sendrecv';
-  await reusableTransceiver.sender.replaceTrack(track);
-  senderSources.set(reusableTransceiver.sender, 'mic');
-  configureSender(reusableTransceiver.sender, track, 'mic');
-  return reusableTransceiver.sender;
 }
 
 function configureSender(sender: RTCRtpSender, track: MediaStreamTrack, source: SenderSource) {
@@ -2073,7 +2056,7 @@ function initials(userId: string) {
           <div class="settings-list">
             <label class="setting-item">
               <span class="setting-label">Mic gain</span>
-              <input v-model.number="inputGain" type="range" min="0" max="200" @input="updateMicGain" />
+              <input v-model.number="inputGain" type="range" min="0" max="100" @input="updateMicGain" />
               <small>{{ inputGain }}%</small>
             </label>
 
