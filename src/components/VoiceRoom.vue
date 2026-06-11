@@ -1319,7 +1319,12 @@ function readStoredValue(key: string, fallback: string) {
 }
 
 function readStoredNumber(key: string, fallback: number, min: number, max: number) {
-  const value = Number(localStorage.getItem(key));
+  const storedValue = localStorage.getItem(key);
+  if (storedValue === null || storedValue.trim() === '') {
+    return fallback;
+  }
+
+  const value = Number(storedValue);
   if (!Number.isFinite(value)) {
     return fallback;
   }
