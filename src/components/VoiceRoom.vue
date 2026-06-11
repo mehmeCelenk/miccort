@@ -1,6 +1,20 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue';
-import { Headphones, Maximize2, Minimize2, MonitorUp, Mic, MicOff, PhoneOff, Settings, Volume2, VolumeX, X } from 'lucide-vue-next';
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue';
+import {
+  Headphones,
+  Maximize2,
+  Minimize2,
+  MonitorUp,
+  Mic,
+  MicOff,
+  PhoneOff,
+  Send,
+  Settings,
+  MessageSquare,
+  Volume2,
+  VolumeX,
+  X,
+} from 'lucide-vue-next';
 
 type SignalType =
   | 'join-room'
@@ -9,6 +23,7 @@ type SignalType =
   | 'offer'
   | 'answer'
   | 'ice-candidate'
+  | 'chat-message'
   | 'room-users'
   | 'ping'
   | 'pong'
@@ -34,6 +49,18 @@ interface ErrorPayload {
 interface UserSummary {
   id: string;
   displayName?: string;
+}
+
+interface ChatPayload {
+  text?: string;
+  sentAt?: number;
+}
+
+interface ChatMessage {
+  id: string;
+  userId: string;
+  text: string;
+  sentAt: number;
 }
 
 interface RemoteScreenShare {
@@ -67,17 +94,22 @@ const settingsOpen = ref(false);
 const sharingScreen = ref(false);
 const wsOpen = ref(false);
 const remoteAudio = ref<HTMLDivElement | null>(null);
+const chatLog = ref<HTMLDivElement | null>(null);
+const chatDraft = ref('');
+const chatMessages = ref<ChatMessage[]>([]);
+const chatOpen = ref(false);
+const unreadChatCount = ref(0);
 const inputDevices = ref<MediaDeviceInfo[]>([]);
 const outputDevices = ref<MediaDeviceInfo[]>([]);
-const selectedInputId = ref('');
-const selectedOutputId = ref('');
-const inputGain = ref(100);
-const inputSensitivity = ref(0);
-const outputVolume = ref(100);
-const selectedScreenFps = ref(30);
-const noiseSuppression = ref(true);
-const echoCancellation = ref(true);
-const autoGainControl = ref(true);
+const selectedInputId = ref(readStoredValue('mikcort:audio:input-device', ''));
+const selectedOutputId = ref(readStoredValue('mikcort:audio:output-device', ''));
+const inputGain = ref(readStoredNumber('mikcort:audio:input-gain', 100, 0, 200));
+const inputSensitivity = ref(readStoredNumber('mikcort:audio:input-sensitivity', 2, 0, 10));
+const outputVolume = ref(readStoredNumber('mikcort:audio:output-volume', 100, 0, 100));
+const selectedScreenFps = ref(readStoredNumber('mikcort:screen:fps', 30, 30, 60));
+const noiseSuppression = ref(readStoredBoolean('mikcort:audio:noise-suppression', true));
+const echoCancellation = ref(readStoredBoolean('mikcort:audio:echo-cancellation', true));
+const autoGainControl = ref(readStoredBoolean('mikcort:audio:auto-gain-control', true));
 const muteShortcut = ref(readStoredValue('mikcort:shortcut:mute', ''));
 const deafenShortcut = ref(readStoredValue('mikcort:shortcut:deafen', ''));
 const capturingShortcut = ref<ShortcutAction | null>(null);
@@ -121,6 +153,7 @@ const peerHeartbeats = new Map<string, { channel: RTCDataChannel; timer?: number
 const peerRecoveryAttempts = new Map<string, number>();
 const remoteTrackRecoveryTimers = new Map<string, number>();
 const pendingOffers = new Map<string, RTCOfferOptions | undefined>();
+const ignoredOfferUsers = new Set<string>();
 const otherUsers = computed(() => users.value.filter((userId) => userId !== currentUserId.value));
 const connectionLabel = computed(() => (wsOpen.value ? 'Connected' : 'Offline'));
 const viewedScreenShare = computed(() => remoteScreens.value.find((share) => share.userId === viewingScreenUser.value) ?? null);
@@ -150,6 +183,42 @@ watch(error, (message) => {
     error.value = '';
     errorTimer = undefined;
   }, 2000);
+});
+
+watch(selectedInputId, (value) => {
+  localStorage.setItem('mikcort:audio:input-device', value);
+});
+
+watch(selectedOutputId, (value) => {
+  localStorage.setItem('mikcort:audio:output-device', value);
+});
+
+watch(inputGain, (value) => {
+  localStorage.setItem('mikcort:audio:input-gain', String(value));
+});
+
+watch(inputSensitivity, (value) => {
+  localStorage.setItem('mikcort:audio:input-sensitivity', String(value));
+});
+
+watch(outputVolume, (value) => {
+  localStorage.setItem('mikcort:audio:output-volume', String(value));
+});
+
+watch(selectedScreenFps, (value) => {
+  localStorage.setItem('mikcort:screen:fps', String(value));
+});
+
+watch(noiseSuppression, (value) => {
+  localStorage.setItem('mikcort:audio:noise-suppression', String(value));
+});
+
+watch(echoCancellation, (value) => {
+  localStorage.setItem('mikcort:audio:echo-cancellation', String(value));
+});
+
+watch(autoGainControl, (value) => {
+  localStorage.setItem('mikcort:audio:auto-gain-control', String(value));
 });
 
 function connect() {
@@ -263,10 +332,10 @@ async function loadDevices() {
   inputDevices.value = devices.filter((device) => device.kind === 'audioinput');
   outputDevices.value = devices.filter((device) => device.kind === 'audiooutput');
 
-  if (!selectedInputId.value && inputDevices.value[0]) {
+  if ((!selectedInputId.value || !inputDevices.value.some((device) => device.deviceId === selectedInputId.value)) && inputDevices.value[0]) {
     selectedInputId.value = inputDevices.value[0].deviceId;
   }
-  if (!selectedOutputId.value && outputDevices.value[0]) {
+  if ((!selectedOutputId.value || !outputDevices.value.some((device) => device.deviceId === selectedOutputId.value)) && outputDevices.value[0]) {
     selectedOutputId.value = outputDevices.value[0].deviceId;
   }
 }
@@ -574,6 +643,11 @@ async function handleSignal(message: SignalMessage) {
         await receiveCandidate(message.userId, message.payload as RTCIceCandidateInit);
       }
       break;
+    case 'chat-message':
+      if (message.userId) {
+        appendChatMessage(message.userId, message.payload as ChatPayload);
+      }
+      break;
     case 'pong':
       break;
     case 'error': {
@@ -594,7 +668,7 @@ async function ensurePeer(userId: string, makeOffer: boolean) {
   if (localStream) {
     for (const track of localStream.getAudioTracks()) {
       if (!peer.getSenders().some((sender) => senderSources.get(sender) === 'mic')) {
-        addSender(peer, track, localStream, 'mic');
+        await addMicSender(peer, track, localStream);
       }
     }
   }
@@ -676,9 +750,14 @@ async function sendOffer(userId: string, peer: RTCPeerConnection, options?: RTCO
 
 function createPeer(userId: string) {
   const peer = new RTCPeerConnection({
-    iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
+    iceServers: [
+      { urls: 'stun:stun.l.google.com:19302' },
+      { urls: 'stun:global.stun.twilio.com:3478' },
+    ],
+    iceCandidatePoolSize: 4,
   });
 
+  peer.addTransceiver('audio', { direction: 'sendrecv' });
   setupPeerHeartbeat(userId, peer.createDataChannel('heartbeat', { ordered: false, maxRetransmits: 0 }));
   peer.ondatachannel = (event) => {
     if (event.channel.label === 'heartbeat') {
@@ -707,11 +786,12 @@ function createPeer(userId: string) {
   };
 
   peer.ontrack = (event) => {
+    const stream = event.streams[0] ?? new MediaStream([event.track]);
     if (event.track.kind === 'audio') {
-      const source = event.streams[0]?.getVideoTracks().length ? 'screen' : 'mic';
-      attachRemoteAudio(userId, event.streams[0], source);
+      const source = stream.getVideoTracks().length ? 'screen' : 'mic';
+      attachRemoteAudio(userId, stream, source);
     } else if (event.track.kind === 'video') {
-      attachRemoteScreen(userId, event.streams[0]);
+      attachRemoteScreen(userId, stream);
     }
   };
 
@@ -732,7 +812,7 @@ function handlePeerConnectionState(userId: string, peer: RTCPeerConnection) {
   }
 
   if (state === 'disconnected' || state === 'failed') {
-    schedulePeerRecovery(userId, peer, state === 'failed' ? 0 : 2500);
+    schedulePeerRecovery(userId, peer, state === 'failed' ? 0 : 10_000);
   }
 }
 
@@ -741,7 +821,9 @@ function schedulePeerRecovery(userId: string, peer: RTCPeerConnection, delay: nu
     return;
   }
 
-  status.value = 'Reconnecting voice...';
+  if (delay === 0) {
+    status.value = 'Reconnecting voice...';
+  }
   const timer = window.setTimeout(() => {
     peerRecoveryTimers.delete(userId);
     if (intentionallyClosed || peer.connectionState === 'closed') {
@@ -750,6 +832,7 @@ function schedulePeerRecovery(userId: string, peer: RTCPeerConnection, delay: nu
     if (isPeerHealthy(peer)) {
       return;
     }
+    status.value = 'Reconnecting voice...';
     void recoverPeer(userId, peer);
   }, delay);
   peerRecoveryTimers.set(userId, timer);
@@ -769,11 +852,7 @@ async function recoverPeer(userId: string, peer: RTCPeerConnection) {
     return;
   }
 
-  const offerSent = await requestPeerOffer(userId, peer, { iceRestart: true });
-  if (!offerSent) {
-    await rebuildPeer(userId);
-    return;
-  }
+  await requestPeerOffer(userId, peer, { iceRestart: true });
 
   if (!isPeerHealthy(peer)) {
     schedulePeerRecovery(userId, peer, 5000);
@@ -792,6 +871,10 @@ async function rebuildPeer(userId: string) {
 }
 
 function shouldInitiatePeerRecovery(userId: string) {
+  return currentUserId.value.localeCompare(userId) > 0;
+}
+
+function isPolitePeer(userId: string) {
   return currentUserId.value.localeCompare(userId) > 0;
 }
 
@@ -829,18 +912,11 @@ function startPeerHeartbeat(userId: string, channel: RTCDataChannel) {
   heartbeat.timer = window.setInterval(() => {
     if (channel.readyState !== 'open') {
       clearPeerHeartbeat(userId);
-      const peer = peers.get(userId);
-      if (peer) {
-        schedulePeerRecovery(userId, peer, 0);
-      }
       return;
     }
     const staleFor = performance.now() - heartbeat.lastSeen;
-    if (staleFor > 30_000) {
-      const peer = peers.get(userId);
-      if (peer) {
-        schedulePeerRecovery(userId, peer, 0);
-      }
+    if (staleFor > 120_000) {
+      clearPeerHeartbeat(userId);
       return;
     }
     channel.send('ping');
@@ -910,10 +986,16 @@ function remoteTrackRecoveryKey(userId: string, source: 'mic' | 'screen') {
 
 async function receiveOffer(userId: string, offer: RTCSessionDescriptionInit) {
   const peer = await ensurePeer(userId, false);
-  if (peer.signalingState === 'have-local-offer') {
-    await peer.setLocalDescription({ type: 'rollback' }).catch(() => undefined);
-  } else if (peer.signalingState !== 'stable') {
+  const offerCollision = makingOffers.has(userId) || peer.signalingState !== 'stable';
+  if (offerCollision && !isPolitePeer(userId)) {
+    ignoredOfferUsers.add(userId);
     return;
+  }
+
+  ignoredOfferUsers.delete(userId);
+  if (offerCollision) {
+    pendingOffers.set(userId, mergeOfferOptions(pendingOffers.get(userId), undefined));
+    await peer.setLocalDescription({ type: 'rollback' }).catch(() => undefined);
   }
 
   await peer.setRemoteDescription(offer).catch(() => undefined);
@@ -940,6 +1022,10 @@ async function receiveOffer(userId: string, offer: RTCSessionDescriptionInit) {
 }
 
 async function receiveCandidate(userId: string, candidate: RTCIceCandidateInit) {
+  if (ignoredOfferUsers.has(userId)) {
+    return;
+  }
+
   const peer = peers.get(userId);
   if (!peer || !peer.remoteDescription) {
     const queued = queuedCandidates.get(userId) ?? [];
@@ -947,14 +1033,14 @@ async function receiveCandidate(userId: string, candidate: RTCIceCandidateInit) 
     queuedCandidates.set(userId, queued);
     return;
   }
-  await peer.addIceCandidate(candidate);
+  await peer.addIceCandidate(candidate).catch(() => undefined);
 }
 
 async function flushQueuedCandidates(userId: string, peer: RTCPeerConnection) {
   const queued = queuedCandidates.get(userId) ?? [];
   queuedCandidates.delete(userId);
   for (const candidate of queued) {
-    await peer.addIceCandidate(candidate);
+    await peer.addIceCandidate(candidate).catch(() => undefined);
   }
 }
 
@@ -1014,7 +1100,7 @@ function startRemoteAudioPlayback(userId: string, source: 'mic' | 'screen', audi
     }
     void audio.play().then(
       () => clearRemoteTrackRecovery(userId, source),
-      () => scheduleRemoteTrackRecovery(userId, source),
+      () => undefined,
     );
   };
 
@@ -1059,6 +1145,85 @@ function closePopovers() {
   activeMemberVolumeUser.value = null;
   activeScreenMenuUser.value = null;
   screenShareMenuOpen.value = false;
+}
+
+function sendChatMessage() {
+  const text = normalizedChatText(chatDraft.value);
+  if (!text || !wsOpen.value) {
+    return;
+  }
+
+  chatOpen.value = true;
+  unreadChatCount.value = 0;
+  chatDraft.value = '';
+  const sentAt = Date.now();
+  chatMessages.value = [
+    ...chatMessages.value,
+    {
+      id: crypto.randomUUID(),
+      userId: currentUserId.value,
+      text,
+      sentAt,
+    },
+  ];
+  scrollChatToBottom();
+  send({
+    type: 'chat-message',
+    roomId: props.roomId,
+    userId: currentUserId.value,
+    payload: {
+      text,
+      sentAt,
+    },
+  });
+}
+
+function appendChatMessage(userId: string, payload: ChatPayload) {
+  const text = normalizedChatText(payload.text ?? '');
+  if (!text) {
+    return;
+  }
+
+  chatMessages.value = [
+    ...chatMessages.value,
+    {
+      id: crypto.randomUUID(),
+      userId,
+      text,
+      sentAt: payload.sentAt && Number.isFinite(payload.sentAt) ? payload.sentAt : Date.now(),
+    },
+  ];
+  if (!chatOpen.value) {
+    unreadChatCount.value += 1;
+  }
+  scrollChatToBottom();
+}
+
+function toggleChat() {
+  chatOpen.value = !chatOpen.value;
+  if (chatOpen.value) {
+    unreadChatCount.value = 0;
+    scrollChatToBottom();
+  }
+}
+
+function normalizedChatText(value: string) {
+  return value.replace(/\s+/g, ' ').trim().slice(0, 500);
+}
+
+function chatTime(sentAt: number) {
+  return new Intl.DateTimeFormat(undefined, {
+    hour: '2-digit',
+    minute: '2-digit',
+  }).format(new Date(sentAt));
+}
+
+function scrollChatToBottom() {
+  void nextTick(() => {
+    if (chatLog.value) {
+      chatLog.value.scrollTop = chatLog.value.scrollHeight;
+    }
+  });
 }
 
 function handleKeydown(event: KeyboardEvent) {
@@ -1153,6 +1318,25 @@ function readStoredValue(key: string, fallback: string) {
   return localStorage.getItem(key) || fallback;
 }
 
+function readStoredNumber(key: string, fallback: number, min: number, max: number) {
+  const value = Number(localStorage.getItem(key));
+  if (!Number.isFinite(value)) {
+    return fallback;
+  }
+  return Math.min(max, Math.max(min, value));
+}
+
+function readStoredBoolean(key: string, fallback: boolean) {
+  const value = localStorage.getItem(key);
+  if (value === 'true') {
+    return true;
+  }
+  if (value === 'false') {
+    return false;
+  }
+  return fallback;
+}
+
 async function toggleScreenShare() {
   if (sharingScreen.value) {
     await stopScreenShare();
@@ -1194,6 +1378,22 @@ function addSender(peer: RTCPeerConnection, track: MediaStreamTrack, stream: Med
   senderSources.set(sender, source);
   configureSender(sender, track, source);
   return sender;
+}
+
+async function addMicSender(peer: RTCPeerConnection, track: MediaStreamTrack, stream: MediaStream) {
+  const reusableTransceiver = peer
+    .getTransceivers()
+    .find((transceiver) => transceiver.receiver.track.kind === 'audio' && !transceiver.sender.track && !senderSources.has(transceiver.sender));
+
+  if (!reusableTransceiver) {
+    return addSender(peer, track, stream, 'mic');
+  }
+
+  reusableTransceiver.direction = 'sendrecv';
+  await reusableTransceiver.sender.replaceTrack(track);
+  senderSources.set(reusableTransceiver.sender, 'mic');
+  configureSender(reusableTransceiver.sender, track, 'mic');
+  return reusableTransceiver.sender;
 }
 
 function configureSender(sender: RTCRtpSender, track: MediaStreamTrack, source: SenderSource) {
@@ -1402,6 +1602,7 @@ function closePeer(userId: string) {
   queuedCandidates.delete(userId);
   makingOffers.delete(userId);
   pendingOffers.delete(userId);
+  ignoredOfferUsers.delete(userId);
   peerRecoveryAttempts.delete(userId);
   clearRemoteTrackRecovery(userId);
   delete peerStates[userId];
@@ -1701,9 +1902,22 @@ function initials(userId: string) {
           <span>{{ users.length }} connected</span>
           <span>{{ status }}</span>
         </div>
-        <div class="connection-pill">
-          <span :class="['dot', wsOpen ? 'online' : 'offline']"></span>
-          {{ connectionLabel }}
+        <div class="stage-actions">
+          <button
+            type="button"
+            class="chat-toggle"
+            :class="{ active: chatOpen }"
+            :title="chatOpen ? 'Close chat' : 'Open chat'"
+            @click.stop="toggleChat"
+          >
+            <MessageSquare :size="17" />
+            <span>Chat</span>
+            <strong v-if="unreadChatCount">{{ unreadChatCount }}</strong>
+          </button>
+          <div class="connection-pill">
+            <span :class="['dot', wsOpen ? 'online' : 'offline']"></span>
+            {{ connectionLabel }}
+          </div>
         </div>
       </header>
 
@@ -1778,6 +1992,39 @@ function initials(userId: string) {
             </div>
           </div>
         </article>
+      </section>
+
+      <section v-if="chatOpen" class="room-chat" aria-label="Room chat" @click.stop>
+        <div class="chat-header">
+          <h2>Chat</h2>
+          <span>{{ chatMessages.length }}</span>
+        </div>
+        <div ref="chatLog" class="chat-messages">
+          <div v-if="!chatMessages.length" class="chat-empty">No messages yet.</div>
+          <article
+            v-for="message in chatMessages"
+            :key="message.id"
+            :class="['chat-message', { mine: message.userId === currentUserId }]"
+          >
+            <div class="chat-meta">
+              <strong>{{ message.userId === currentUserId ? 'You' : displayName(message.userId) }}</strong>
+              <time>{{ chatTime(message.sentAt) }}</time>
+            </div>
+            <p>{{ message.text }}</p>
+          </article>
+        </div>
+        <form class="chat-form" @submit.prevent="sendChatMessage">
+          <input v-model="chatDraft" maxlength="500" autocomplete="off" placeholder="Message room" />
+          <button
+            type="submit"
+            class="icon-button compact-button"
+            data-tooltip="Send"
+            title="Send message"
+            :disabled="!normalizedChatText(chatDraft) || !wsOpen"
+          >
+            <Send :size="17" />
+          </button>
+        </form>
       </section>
     </main>
 

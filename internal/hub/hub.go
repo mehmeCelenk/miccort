@@ -55,6 +55,8 @@ func (h *Hub) Handle(client *Client, msg Message) {
 		client.send(Message{Type: "pong", RoomID: client.RoomID, UserID: client.UserID})
 	case "offer", "answer", "ice-candidate":
 		h.forward(client, msg)
+	case "chat-message":
+		h.broadcastRoom(client, msg)
 	default:
 		client.send(Message{Type: "error", Payload: rawError("unknown message type")})
 	}
@@ -205,6 +207,29 @@ func (h *Hub) forward(client *Client, msg Message) {
 	msg.RoomID = client.RoomID
 	msg.UserID = client.UserID
 	target.send(msg)
+}
+
+func (h *Hub) broadcastRoom(client *Client, msg Message) {
+	if client.RoomID == "" {
+		client.send(Message{Type: "error", Payload: rawError("join a room before sending chat")})
+		return
+	}
+
+	h.mu.RLock()
+	others := make([]*Client, 0, len(h.clients[client.RoomID]))
+	for userID, other := range h.clients[client.RoomID] {
+		if userID != client.UserID {
+			others = append(others, other)
+		}
+	}
+	h.mu.RUnlock()
+
+	msg.RoomID = client.RoomID
+	msg.UserID = client.UserID
+	msg.TargetUserID = ""
+	for _, other := range others {
+		other.send(msg)
+	}
 }
 
 func (h *Hub) leaveLocked(client *Client) (string, string, []*Client) {

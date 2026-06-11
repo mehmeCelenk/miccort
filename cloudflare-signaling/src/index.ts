@@ -7,6 +7,7 @@ type SignalType =
   | "offer"
   | "answer"
   | "ice-candidate"
+  | "chat-message"
   | "room-users"
   | "ping"
   | "pong"
@@ -131,6 +132,9 @@ export class SignalingHub extends DurableObject<Env> {
       case "ice-candidate":
         this.forward(socket, message);
         break;
+      case "chat-message":
+        this.broadcastRoom(socket, message);
+        break;
       default:
         this.send(socket, { type: "error", payload: { message: "unknown message type" } });
     }
@@ -232,6 +236,21 @@ export class SignalingHub extends DurableObject<Env> {
       roomId: session.roomId,
       userId: session.userId,
     });
+  }
+
+  private broadcastRoom(socket: WebSocket, message: SignalMessage) {
+    const session = this.sessions.get(socket);
+    if (!session) {
+      this.send(socket, { type: "error", payload: { message: "join a room before sending chat" } });
+      return;
+    }
+
+    this.broadcast(session.roomId, {
+      ...message,
+      roomId: session.roomId,
+      userId: session.userId,
+      targetUserId: undefined,
+    }, session.userId);
   }
 
   private pong(socket: WebSocket) {

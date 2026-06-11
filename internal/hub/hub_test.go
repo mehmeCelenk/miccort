@@ -1,6 +1,9 @@
 package hub
 
-import "testing"
+import (
+	"encoding/json"
+	"testing"
+)
 
 func TestRoomsListsDisplayNamesAndDropsEmptyRooms(t *testing.T) {
 	h := New()
@@ -56,5 +59,51 @@ func TestStaleDuplicateClientLeaveDoesNotRemoveActiveClient(t *testing.T) {
 	}
 	if got, want := rooms[0].Users, []string{"Bob"}; len(got) != len(want) || got[0] != want[0] {
 		t.Fatalf("expected users %v, got %v", want, got)
+	}
+}
+
+func TestChatMessageBroadcastsToRoomPeers(t *testing.T) {
+	h := New()
+	alice := &Client{Send: make(chan []byte, 8)}
+	bob := &Client{Send: make(chan []byte, 8)}
+
+	h.Join(alice, "lounge", "alice-id", "Alice")
+	h.Join(bob, "lounge", "bob-id", "Bob")
+	drain(alice.Send)
+	drain(bob.Send)
+
+	h.Handle(alice, Message{
+		Type:    "chat-message",
+		Payload: mustJSON(map[string]string{"text": "selam"}),
+	})
+
+	var got Message
+	select {
+	case data := <-bob.Send:
+		if err := json.Unmarshal(data, &got); err != nil {
+			t.Fatalf("failed to decode chat message: %v", err)
+		}
+	default:
+		t.Fatal("expected Bob to receive chat message")
+	}
+
+	if got.Type != "chat-message" || got.RoomID != "lounge" || got.UserID != "alice-id" || got.TargetUserID != "" {
+		t.Fatalf("unexpected chat message envelope: %+v", got)
+	}
+
+	select {
+	case data := <-alice.Send:
+		t.Fatalf("expected Alice not to receive her own chat echo, got %s", string(data))
+	default:
+	}
+}
+
+func drain(ch <-chan []byte) {
+	for {
+		select {
+		case <-ch:
+		default:
+			return
+		}
 	}
 }

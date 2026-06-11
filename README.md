@@ -8,7 +8,7 @@ Lightweight desktop voice chat for small rooms. The Go backend is only a WebRTC 
 - Backend: Go standard library
 - Transport: WebSocket signaling
 - Voice: WebRTC mesh peer-to-peer
-- STUN: `stun:stun.l.google.com:19302`
+- STUN: `stun:stun.l.google.com:19302`, `stun:global.stun.twilio.com:3478`
 - No media server, TURN, database, auth, Docker, Kubernetes, or Redis
 
 ## Run Locally
