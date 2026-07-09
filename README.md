@@ -1,77 +1,120 @@
 # Mikcort Voice
 
-Lightweight desktop voice chat for small rooms. The Go and Cloudflare backends are signaling-only; audio, screen share, and voice data flow directly between clients through peer-to-peer WebRTC.
+Kucuk odalar icin hafif masaustu sesli sohbet uygulamasi. Go ve Cloudflare backend'leri yalnizca signaling icindir; ses, ekran paylasimi ve medya verisi istemciler arasinda peer-to-peer WebRTC ile akar.
 
-## Project Structure
+[English README](README.en.md)
+
+## Proje Yapisi
 
 ```text
 mikcort/
-  frontend/                    Vue 3 + Tauri desktop app
-    src/                       Frontend source
-    src-tauri/                 Native desktop shell
+  frontend/                    Vue 3 + Tauri masaustu uygulamasi
+    src/                       Frontend kaynak kodu
+    src-tauri/                 Native masaustu kabugu
   backend/
-    go/                        Self-hosted Go signaling server
+    go/                        Self-host edilebilir Go signaling server
       cmd/server/
       internal/
     cloudflare-signaling/      Cloudflare Workers + Durable Objects signaling server
 ```
 
-## Stack
+## Nasil Calisir?
 
-- Desktop UI: Tauri + Vue 3 + TypeScript
-- Backend option 1: Go standard library WebSocket signaling
-- Backend option 2: Cloudflare Workers + Durable Objects
-- Voice: WebRTC mesh peer-to-peer
+Mikcort iki ana parcadan olusur:
+
+- `frontend/`: masaustu istemci. Vue arayuzunu render eder, mikrofon/ekran stream'lerini acar, WebRTC peer connection'lari kurar ve uzak sesi oynatir.
+- `backend/`: signaling backend'leri. Ses verisini almaz veya relay etmez. Sadece istemcilerin birbirini bulmasina ve WebRTC kurulum mesajlarini takas etmesine yardim eder.
+
+Uygulama iki backend'den biriyle calisabilir:
+
+- `backend/go/`: kucuk, self-host edilebilir WebSocket server.
+- `backend/cloudflare-signaling/`: Cloudflare Workers + Durable Objects kullanan hosted signaling alternatifi.
+
+Iki backend de ayni WebSocket mesaj kontratini konusur. Bu yuzden frontend tarafinda sadece signaling server URL'sini degistirerek Go veya Cloudflare backend'e gecebilirsin.
+
+### Baglanti Akisi
+
+1. Istemci uygulamayi acar ve signaling server'a `/ws` uzerinden baglanir.
+2. Istemci `join-room` mesaji ile bir odaya girer.
+3. Signaling backend odadaki kullanicilari takip eder ve yeni istemciye mevcut oda uyelerini yollar.
+4. Istemciler WebRTC `offer`, `answer` ve `ice-candidate` mesajlarini signaling backend uzerinden takas eder.
+5. WebRTC baglantisi kurulduktan sonra mikrofon sesi ve ekran paylasimi dogrudan istemciler arasinda peer-to-peer akar.
+6. Chat mesajlari kucuk oda event'leri oldugu icin signaling backend uzerinden gitmeye devam eder.
+
+```text
+Masaustu istemci A  <-- WebRTC ses/ekran -->  Masaustu istemci B
+          |                                            |
+          +----------- WebSocket signaling ------------+
+                           |
+                    Go veya Cloudflare backend
+```
+
+### Gizlilik Ve Odalar
+
+Odalar, ilk kullanici bir oda ID'sine girdiginde otomatik olusur. Oda public veya sifreli olabilir:
+
+- Public odalarda oda listesindeki bagli kullanicilarin gorunen adlari listelenir.
+- Sifreli odalarda odanin var oldugu gorunur, fakat kullanici isimleri ve kullanici sayisi gizlenir.
+- Oda sifresi yalnizca signaling backend'in bellek icindeki oda state'inde tutulur ve oda bosalinca silinir.
+
+Bu sayede proje hafif kalir: veritabani yok, hesap sistemi yok, merkezi medya server yok.
+
+## Teknoloji
+
+- Masaustu UI: Tauri + Vue 3 + TypeScript
+- Backend secenek 1: Go standard library WebSocket signaling
+- Backend secenek 2: Cloudflare Workers + Durable Objects
+- Ses: WebRTC mesh peer-to-peer
 - STUN: `stun:stun.l.google.com:19302`, `stun:global.stun.twilio.com:3478`
-- No media server, database, auth, Kubernetes, or Redis
+- Media server, database, auth, Kubernetes veya Redis yok
 
-## Run Locally
+## Lokal Calistirma
 
-Start the Go signaling server:
+Go signaling server'i baslat:
 
 ```powershell
 cd backend/go
 go run ./cmd/server
 ```
 
-The server listens on `:8080` by default. Override it with:
+Server varsayilan olarak `:8080` uzerinden dinler. Degistirmek icin:
 
 ```powershell
 cd backend/go
 $env:ADDR=":9090"; go run ./cmd/server
 ```
 
-Install frontend dependencies:
+Frontend bagimliliklarini kur:
 
 ```powershell
 cd frontend
 cmd /c npm install
 ```
 
-Run the Tauri app in development:
+Tauri uygulamasini development modda calistir:
 
 ```powershell
 cd frontend
 cmd /c npm run tauri dev
 ```
 
-You can also run the web UI only for quick browser testing:
+Hizli tarayici testi icin sadece web UI da calistirilabilir:
 
 ```powershell
 cd frontend
 cmd /c npm run dev
 ```
 
-## Usage
+## Kullanim
 
-1. Start one signaling backend.
-2. Start two or more app instances.
-3. Create a room in one instance.
-4. Join the same room ID from the other instances.
-5. Optional: set a room password to hide the room's users in the public room list.
-6. Press **Start microphone** in each instance.
+1. Bir signaling backend baslat.
+2. Iki veya daha fazla uygulama instance'i ac.
+3. Bir instance'ta oda olustur.
+4. Diger instance'lardan ayni oda ID'sine gir.
+5. Opsiyonel: oda sifresi belirleyerek public oda listesindeki kullanici bilgisini gizle.
+6. Her instance'ta **Start microphone** butonuna bas.
 
-## Checks
+## Kontroller
 
 ```powershell
 cd backend/go
@@ -89,11 +132,11 @@ cd backend/cloudflare-signaling
 cmd /c npm run typecheck
 ```
 
-Tauri native builds also require the Rust toolchain and the platform-specific Tauri prerequisites.
+Tauri native build'leri icin Rust toolchain ve platforma ozel Tauri gereksinimleri de gerekir.
 
-## Desktop Auto Updates
+## Masaustu Otomatik Guncellemeler
 
-The Tauri desktop app uses the official Tauri updater plugin and GitHub Releases.
+Tauri masaustu uygulamasi resmi Tauri updater plugin'ini ve GitHub Releases'i kullanir.
 
 Updater endpoint:
 
@@ -101,64 +144,64 @@ Updater endpoint:
 https://github.com/mehmeCelenk/miccort/releases/latest/download/latest.json
 ```
 
-The app checks for updates on startup. If an update exists, it downloads and installs it automatically, then asks the user to restart.
+Uygulama baslangicta guncelleme kontrolu yapar. Guncelleme varsa indirip kurar ve kullanicidan yeniden baslatma ister.
 
-### Signing Keys
+### Imzalama Anahtarlari
 
-Updates are signed. The public key is stored in `frontend/src-tauri/tauri.conf.json`. The private key must stay secret and is ignored by Git under `frontend/.tauri/`.
+Guncellemeler imzalanir. Public key `frontend/src-tauri/tauri.conf.json` icinde tutulur. Private key gizli kalmali ve Git tarafindan `frontend/.tauri/` altinda ignore edilir.
 
-Generate a new keypair only if you are starting a new update channel:
+Yeni keypair'i sadece yeni bir update kanali baslatirken uret:
 
 ```powershell
 cd frontend
 cmd /c npm run tauri signer generate -- --ci -f -w .tauri\mikcort-updater.key
 ```
 
-Use the generated public key in `frontend/src-tauri/tauri.conf.json`.
+Uretilen public key'i `frontend/src-tauri/tauri.conf.json` icinde kullan.
 
-Add these GitHub repository secrets:
+GitHub repository secrets:
 
 ```text
 TAURI_SIGNING_PRIVATE_KEY
 TAURI_SIGNING_PRIVATE_KEY_PASSWORD
 ```
 
-If the key was generated with `--ci` and no password, set `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` to an empty string or omit it.
+Key `--ci` ile ve sifresiz uretildiyse `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` bos string olabilir veya hic tanimlanmayabilir.
 
-### Releasing A New Version
+### Yeni Versiyon Cikarma
 
-Use semantic versioning, for example `0.2.0`.
+Semantic versioning kullan, ornegin `0.2.12`.
 
-1. Update the version in:
+1. Version alanlarini guncelle:
    - `frontend/package.json`
    - `frontend/src-tauri/Cargo.toml`
    - `frontend/src-tauri/tauri.conf.json`
-2. Commit the version bump.
-3. Create and push a matching tag:
+2. Version bump commit'i at.
+3. Ayni version tag'ini olusturup pushla:
 
 ```powershell
-git tag v0.2.0
-git push origin main v0.2.0
+git tag v0.2.12
+git push origin main v0.2.12
 ```
 
-The `Release desktop app` workflow builds the Windows app and a universal macOS desktop app, signs updater artifacts, creates a GitHub Release, and uploads `latest.json`.
+`Release desktop app` workflow'u Windows app ve universal macOS desktop app build eder, updater artifact'larini imzalar, GitHub Release olusturur ve `latest.json` yukler.
 
 ## Docker Backend
 
-Build and push the Go signaling server image:
+Go signaling server image'ini build ve push et:
 
 ```powershell
 docker build -t mehmetcelenk/miccort:latest backend/go
 docker push mehmetcelenk/miccort:latest
 ```
 
-Run it on a VM while publishing host port `8081`:
+Bir VM uzerinde host port `8081` yayinlayarak calistir:
 
 ```bash
 docker run -d --name miccort-signaling --restart unless-stopped -p 8081:8080 mehmetcelenk/miccort:latest
 ```
 
-Desktop clients should then use:
+Masaustu istemciler su URL'yi kullanabilir:
 
 ```text
 ws://SERVER_IP:8081/ws
@@ -166,7 +209,7 @@ ws://SERVER_IP:8081/ws
 
 ## Cloudflare Workers Backend
 
-An alternative signaling backend lives in `backend/cloudflare-signaling/`. It uses Cloudflare Workers + Durable Objects and keeps the same WebSocket message contract as the Go backend.
+Alternatif signaling backend `backend/cloudflare-signaling/` altindadir. Cloudflare Workers + Durable Objects kullanir ve Go backend ile ayni WebSocket mesaj kontratini korur.
 
 ```bash
 cd backend/cloudflare-signaling
@@ -174,10 +217,10 @@ npm install
 npm run deploy
 ```
 
-Desktop clients can then use:
+Masaustu istemciler deploy edilen Worker URL'sini kullanabilir:
 
 ```text
 wss://miccort-signaling.<your-subdomain>.workers.dev/ws
 ```
 
-The Cloudflare backend is also signaling-only. WebRTC audio remains peer-to-peer.
+Cloudflare backend de sadece signaling yapar. WebRTC sesi peer-to-peer kalir.
