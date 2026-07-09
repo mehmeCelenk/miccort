@@ -4,7 +4,7 @@ on:
   push:
     branches: ["main"]
     paths:
-      - "cloudflare-signaling/**"
+      - "backend/cloudflare-signaling/**"
       - ".github/workflows/cloudflare-signaling.yml"
   workflow_dispatch:
 
@@ -23,14 +23,14 @@ jobs:
         with:
           node-version: 22
           cache: npm
-          cache-dependency-path: cloudflare-signaling/package-lock.json
+          cache-dependency-path: backend/cloudflare-signaling/package-lock.json
 
       - name: Install dependencies
-        working-directory: cloudflare-signaling
+        working-directory: backend/cloudflare-signaling
         run: npm ci
 
       - name: Typecheck
-        working-directory: cloudflare-signaling
+        working-directory: backend/cloudflare-signaling
         run: npm run typecheck
 
       - name: Deploy Worker
@@ -38,5 +38,5 @@ jobs:
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          workingDirectory: cloudflare-signaling
+          workingDirectory: backend/cloudflare-signaling
           command: deploy

@@ -1,8 +1,8 @@
-node_modules/
-dist/
-.gocache/
-src-tauri/target/
-.env
-.tauri/
+**/node_modules/
+**/dist/
+**/.gocache/
+**/src-tauri/target/
+**/.env
+**/.tauri/
 /mikcort.exe
 /uninstall.exe
