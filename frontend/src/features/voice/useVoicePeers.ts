@@ -58,6 +58,8 @@ export function useVoicePeers({
   const peerRecoveryAttempts = new Map<string, number>();
   const remoteTrackRecoveryTimers = new Map<string, number>();
   const pendingOffers = new Map<string, RTCOfferOptions | undefined>();
+  const queuedScreenShareOffers = new Set<string>();
+  const queuedScreenShareOfferTimers = new Map<string, number>();
   const ignoredOfferUsers = new Set<string>();
 
   async function ensurePeer(userId: string, makeOffer: boolean) {
@@ -102,6 +104,44 @@ export function useVoicePeers({
       pendingOffers.set(userId, mergeOfferOptions(pendingOffers.get(userId), options));
     }
     return offerSent;
+  }
+
+  function queueScreenShareOffer(userId: string) {
+    if (!hasLiveScreenStream()) {
+      return;
+    }
+
+    queuedScreenShareOffers.add(userId);
+    if (queuedScreenShareOfferTimers.has(userId)) {
+      return;
+    }
+
+    const timer = window.setTimeout(() => {
+      queuedScreenShareOfferTimers.delete(userId);
+      void flushQueuedScreenShareOffer(userId);
+    }, 1500);
+    queuedScreenShareOfferTimers.set(userId, timer);
+  }
+
+  async function flushQueuedScreenShareOffer(userId: string) {
+    if (!queuedScreenShareOffers.has(userId) || !hasLiveScreenStream() || !getSocketOpen()) {
+      queuedScreenShareOffers.delete(userId);
+      return;
+    }
+
+    const peer = peers.get(userId);
+    if (!peer || peer.signalingState !== 'stable' || peer.connectionState === 'closed') {
+      return;
+    }
+
+    await ensurePeer(userId, false);
+    const currentPeer = peers.get(userId);
+    if (!currentPeer || currentPeer.signalingState !== 'stable') {
+      return;
+    }
+
+    queuedScreenShareOffers.delete(userId);
+    await requestPeerOffer(userId, currentPeer);
   }
 
   async function receiveAnswer(userId: string, answer: RTCSessionDescriptionInit) {
@@ -435,6 +475,7 @@ export function useVoicePeers({
       payload: answer,
     });
     await flushPendingOffer(userId, peer);
+    await flushQueuedScreenShareOffer(userId);
   }
 
   async function receiveCandidate(userId: string, candidate: RTCIceCandidateInit) {
@@ -555,6 +596,7 @@ export function useVoicePeers({
   function closePeer(userId: string) {
     clearPeerRecovery(userId);
     clearPeerHeartbeat(userId);
+    clearQueuedScreenShareOffer(userId);
     peers.get(userId)?.close();
     peers.delete(userId);
     queuedCandidates.delete(userId);
@@ -572,6 +614,19 @@ export function useVoicePeers({
     remoteAudio.value?.querySelectorAll(`[data-user-id="${userId}"]`).forEach((element) => element.remove());
   }
 
+  function clearQueuedScreenShareOffer(userId: string) {
+    const timer = queuedScreenShareOfferTimers.get(userId);
+    if (timer) {
+      window.clearTimeout(timer);
+    }
+    queuedScreenShareOfferTimers.delete(userId);
+    queuedScreenShareOffers.delete(userId);
+  }
+
+  function hasLiveScreenStream() {
+    return getScreenStream()?.getTracks().some((track) => track.readyState === 'live') ?? false;
+  }
+
   function closeAllPeers() {
     for (const userId of peers.keys()) {
       closePeer(userId);
@@ -585,6 +640,7 @@ export function useVoicePeers({
     configureSender,
     ensurePeer,
     peers,
+    queueScreenShareOffer,
     receiveAnswer,
     receiveCandidate,
     receiveOffer,

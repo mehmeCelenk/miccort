@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
-import { Lock, LogIn, Plus, RefreshCw, Users } from 'lucide-vue-next';
+import { Lock, Plus, RefreshCw, Users } from 'lucide-vue-next';
 import VoiceRoom from './components/VoiceRoom.vue';
 import { usePersistentString } from './composables/usePersistentStorage';
 import { buildRoomsEndpoint, fetchLiveRooms } from './features/rooms/api';
@@ -20,12 +20,6 @@ const roomsError = ref('');
 const roomJoinHint = ref('');
 let roomRefreshTimer: number | undefined;
 
-const canJoin = computed(
-  () =>
-    roomId.value.trim().length > 0 &&
-    serverUrl.value.trim().length > 0 &&
-    displayName.value.trim().length > 0,
-);
 const canCreate = computed(() => serverUrl.value.trim().length > 0 && displayName.value.trim().length > 0);
 const roomsEndpoint = computed(() => buildRoomsEndpoint(serverUrl.value));
 
@@ -50,7 +44,7 @@ function createRoom() {
 }
 
 function joinRoom() {
-  if (!canJoin.value) {
+  if (!canCreate.value || !roomId.value.trim()) {
     return;
   }
   roomJoinHint.value = '';
@@ -139,7 +133,7 @@ async function loadRooms() {
         <div class="join-stack">
           <label>
             Display name
-            <input v-model="displayName" autocomplete="name" placeholder="Your Name" @keyup.enter="joinRoom" />
+            <input v-model="displayName" autocomplete="name" placeholder="Your Name" />
           </label>
 
           <label>
@@ -148,16 +142,11 @@ async function loadRooms() {
           </label>
 
           <label>
-            Room ID
-            <input v-model="roomId" autocomplete="off" placeholder="Room code" @input="roomJoinHint = ''" @keyup.enter="joinRoom" />
-          </label>
-
-          <label>
             Room password
             <input
               v-model="roomPassword"
               autocomplete="off"
-              placeholder="Optional"
+              placeholder="Optional for private rooms"
               type="password"
               @input="roomJoinHint = ''"
               @keyup.enter="joinRoom"
@@ -207,13 +196,9 @@ async function loadRooms() {
         </div>
 
         <div class="actions">
-          <button type="button" class="primary action-with-icon" :disabled="!canJoin" @click="joinRoom">
-            <LogIn :size="17" />
-            Join room
-          </button>
           <button type="button" class="secondary action-with-icon" :disabled="!canCreate" @click="createRoom">
             <Plus :size="17" />
-            Create room
+            Create new room
           </button>
         </div>
       </div>

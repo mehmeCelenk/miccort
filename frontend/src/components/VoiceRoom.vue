@@ -89,6 +89,7 @@ const {
   configureSender,
   ensurePeer,
   peers,
+  queueScreenShareOffer,
   receiveAnswer,
   receiveCandidate,
   receiveOffer,
@@ -343,6 +344,7 @@ async function handleSignal(message: SignalMessage) {
         if (localStream.value) {
           await ensurePeer(message.userId, false);
         }
+        queueScreenShareOffer(message.userId);
       }
       break;
     case 'user-left':
