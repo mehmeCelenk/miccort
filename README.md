@@ -141,7 +141,7 @@ Tauri masaustu uygulamasi resmi Tauri updater plugin'ini ve GitHub Releases'i ku
 Updater endpoint:
 
 ```text
-https://github.com/mehmeCelenk/miccort/releases/latest/download/latest.json
+https://github.com/mehmeCelenk/mikcort/releases/latest/download/latest.json
 ```
 
 Uygulama baslangicta guncelleme kontrolu yapar. Guncelleme varsa indirip kurar ve kullanicidan yeniden baslatma ister.
@@ -191,14 +191,14 @@ git push origin main v0.2.12
 Go signaling server image'ini build ve push et:
 
 ```powershell
-docker build -t mehmetcelenk/miccort:latest backend/go
-docker push mehmetcelenk/miccort:latest
+docker build -t mehmetcelenk/mikcort:latest backend/go
+docker push mehmetcelenk/mikcort:latest
 ```
 
 Bir VM uzerinde host port `8081` yayinlayarak calistir:
 
 ```bash
-docker run -d --name miccort-signaling --restart unless-stopped -p 8081:8080 mehmetcelenk/miccort:latest
+docker run -d --name mikcort-signaling --restart unless-stopped -p 8081:8080 mehmetcelenk/mikcort:latest
 ```
 
 Masaustu istemciler su URL'yi kullanabilir:
@@ -220,7 +220,7 @@ npm run deploy
 Masaustu istemciler deploy edilen Worker URL'sini kullanabilir:
 
 ```text
-wss://miccort-signaling.<your-subdomain>.workers.dev/ws
+wss://mikcort-signaling.<your-subdomain>.workers.dev/ws
 ```
 
 Cloudflare backend de sadece signaling yapar. WebRTC sesi peer-to-peer kalir.

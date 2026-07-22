@@ -1,6 +1,6 @@
 # Cloudflare Signaling Backend
 
-Alternative signaling backend for Miccort using Cloudflare Workers + Durable Objects.
+Alternative signaling backend for Mikcort using Cloudflare Workers + Durable Objects.
 
 The Go backend remains unchanged. This Worker only forwards WebRTC signaling messages. Audio still flows directly between clients using WebRTC P2P.
 
@@ -48,7 +48,7 @@ npm run deploy
 Then use the deployed Worker URL in the desktop app:
 
 ```text
-wss://miccort-signaling.<your-subdomain>.workers.dev/ws
+wss://mikcort-signaling.<your-subdomain>.workers.dev/ws
 ```
 
 ## Notes

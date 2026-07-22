@@ -141,7 +141,7 @@ The Tauri desktop app uses the official Tauri updater plugin and GitHub Releases
 Updater endpoint:
 
 ```text
-https://github.com/mehmeCelenk/miccort/releases/latest/download/latest.json
+https://github.com/mehmeCelenk/mikcort/releases/latest/download/latest.json
 ```
 
 The app checks for updates on startup. If an update exists, it downloads and installs it automatically, then asks the user to restart.
@@ -191,14 +191,14 @@ The `Release desktop app` workflow builds the Windows app and a universal macOS 
 Build and push the Go signaling server image:
 
 ```powershell
-docker build -t mehmetcelenk/miccort:latest backend/go
-docker push mehmetcelenk/miccort:latest
+docker build -t mehmetcelenk/mikcort:latest backend/go
+docker push mehmetcelenk/mikcort:latest
 ```
 
 Run it on a VM while publishing host port `8081`:
 
 ```bash
-docker run -d --name miccort-signaling --restart unless-stopped -p 8081:8080 mehmetcelenk/miccort:latest
+docker run -d --name mikcort-signaling --restart unless-stopped -p 8081:8080 mehmetcelenk/mikcort:latest
 ```
 
 Desktop clients should then use:
@@ -220,7 +220,7 @@ npm run deploy
 Desktop clients can then use:
 
 ```text
-wss://miccort-signaling.<your-subdomain>.workers.dev/ws
+wss://mikcort-signaling.<your-subdomain>.workers.dev/ws
 ```
 
 The Cloudflare backend is also signaling-only. WebRTC audio remains peer-to-peer.

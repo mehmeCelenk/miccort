@@ -11,7 +11,7 @@ on:
         default: "latest"
 
 env:
-  IMAGE_NAME: mehmetcelenk/miccort
+  IMAGE_NAME: mehmetcelenk/mikcort
 
 jobs:
   docker:
